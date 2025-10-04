@@ -314,18 +314,6 @@ def scratchpad_history(pad_name: str, section_name: str, limit: int = 10) -> str
 
     return output
 
-def scratchpad_cleanup_formatting(pad_name: str, section_name: str) -> str:
-    """
-    Clean common formatting issues in a scratchpad section.
-    Fixes LaTeX escaping, spacing issues, special characters.
-    Call this after writing content to ensure clean markdown.
-    """
-    manager = st.session_state.get("scratchpad_manager")
-    if not manager:
-        return "Error: Scratchpad manager not initialized"
-
-    return manager.cleanup_formatting(pad_name, section_name)
-
 def scratchpad_insert_lines(pad_name: str, section_name: str, line_number: int, content: str) -> str:
     """
     Insert lines at a specific line number in a section (like Claude Code).
@@ -518,7 +506,6 @@ TOOL_FUNCTIONS: Dict[str, Callable] = {
     "scratchpad_insert_lines": scratchpad_insert_lines,
     "scratchpad_delete_lines": scratchpad_delete_lines,
     "scratchpad_replace_lines": scratchpad_replace_lines,
-    "scratchpad_cleanup_formatting": scratchpad_cleanup_formatting,
     "get_cached_search_results": get_cached_search_results,
     "scratchpad_get_lines": scratchpad_get_lines,
     "scratchpad_history": scratchpad_history,
@@ -1423,8 +1410,7 @@ def call_vision_model(base64_image: str, prompt_text: str) -> str:
         return f"[VISION_PROCESSING_ERROR: {e}]"
 
 def extract_structured_data(full_text: str, filename: str) -> dict:
-    status_placeholder = st.empty()
-    status_placeholder.info("Extracting structured data from document...")
+    st.info("Extracting structured data from document...")
 
     extraction_schema = {
         "projectName": "string",
@@ -1466,15 +1452,11 @@ def extract_structured_data(full_text: str, filename: str) -> dict:
 
         extracted_data = json.loads(response.choices[0].message.content)
         extracted_data['id'] = f"proj_{uuid.uuid4()}"
-        status_placeholder.success("Successfully extracted structured data.")
-        time.sleep(2)
-        status_placeholder.empty()
+        st.success("Successfully extracted structured data.")
         return extracted_data
 
     except Exception as e:
-        status_placeholder.error(f"Failed to extract structured data: {e}")
-        time.sleep(3)
-        status_placeholder.empty()
+        st.error(f"Failed to extract structured data: {e}")
         return None
 
 
@@ -2609,7 +2591,7 @@ def transcribe_m4a_audio(file_bytes: bytes) -> str:
         return ""
 
 # =========================== MULTI-AGENT FRAMEWORK ===========================
-MAX_LOOPS = 50  # Increased from 20 to allow for complete, comprehensive reports
+MAX_LOOPS = 20
 
 # =========================== SCRATCHPAD MANAGER ===========================
 class ScratchpadManager:
@@ -2914,48 +2896,7 @@ class ScratchpadManager:
             return pad_data["error"]
 
         sections = pad_data.get("sections", {})
-
-        # Sort sections: numbered sections first (1_, 2_, etc.), then others alphabetically
-        def sort_key(item):
-            name = item[0]
-            # Extract leading number if present (e.g., "1_exec_summary" → 1)
-            if name and name[0].isdigit():
-                num_part = ""
-                for char in name:
-                    if char.isdigit():
-                        num_part += char
-                    else:
-                        break
-                return (0, int(num_part))  # Priority 0 for numbered, sort by number
-            else:
-                return (1, name)  # Priority 1 for non-numbered, sort alphabetically
-
-        sorted_sections = sorted(sections.items(), key=sort_key)
-
-        # Deduplicate: prefer numbered sections over non-numbered versions
-        # E.g., if both "1_executive_summary" and "Executive Summary" exist, keep only "1_executive_summary"
-        seen_topics = set()
-        deduplicated = []
-        for name, content in sorted_sections:
-            # Normalize name to detect duplicates: "1_executive_summary" → "executive summary"
-            normalized = name.lower().lstrip('0123456789_').replace('_', ' ').strip()
-
-            if normalized not in seen_topics:
-                seen_topics.add(normalized)
-                deduplicated.append((name, content))
-            # If normalized topic already seen, skip (prefer numbered version which comes first)
-
-        # Don't add section name as header if content already starts with a header
-        parts = []
-        for name, content in deduplicated:
-            if content.strip().startswith('#'):
-                # Content already has headers, don't add section name
-                parts.append(content)
-            else:
-                # Content doesn't have headers, add section name as header
-                parts.append(f"## {name}\n{content}")
-
-        return "\n\n".join(parts)
+        return "\n\n".join([f"## {name}\n{content}" for name, content in sections.items()])
 
     def get_all_pads_summary(self) -> str:
         """Get a summary of all scratchpads and their sections"""
@@ -3034,58 +2975,6 @@ class ScratchpadManager:
         conn.close()
         return True
 
-    def cleanup_formatting(self, pad_name: str, section_name: str) -> str:
-        """
-        Clean common formatting issues in a section (LaTeX escaping, spacing).
-
-        Fixes:
-        - LaTeX-style dollar escaping: $1.3trillion → $1.3 trillion
-        - Escaped special chars: F−35 → F-35
-        - Missing spaces after punctuation
-        - Multiple consecutive spaces
-
-        Args:
-            pad_name: Name of the pad
-            section_name: Name of the section to clean
-
-        Returns:
-            Status message with diff showing changes
-        """
-        content = self.read_section(pad_name, section_name)
-        if not content or "Error:" in content:
-            return f"❌ Cannot clean - section not found: {pad_name}.{section_name}"
-
-        original = content
-
-        # Fix common LaTeX escaping issues
-        import re
-
-        # Fix dollar amounts: $1.3trillion → $1.3 trillion
-        content = re.sub(r'\$(\d+\.?\d*)(billion|trillion|million)', r'$\1 \2', content)
-
-        # Fix escaped minus signs: F−35 → F-35 (U+2212 to hyphen-minus)
-        content = content.replace('−', '-')
-
-        # Fix escaped newlines in content
-        content = content.replace('\\n', '\n')
-
-        # Fix multiple spaces
-        content = re.sub(r'  +', ' ', content)
-
-        # Fix space before punctuation
-        content = re.sub(r' ([.,;:])', r'\1', content)
-
-        # Fix missing space after punctuation (but not in numbers like "1.3" or URLs)
-        content = re.sub(r'([.,;:])([A-Za-z])', r'\1 \2', content)
-
-        if content == original:
-            return f"✅ Section '{pad_name}.{section_name}' already clean - no changes needed"
-
-        # Write cleaned content back
-        self.write_section(pad_name, section_name, content, mode="replace", agent_name="Formatter")
-
-        return f"✅ Cleaned formatting in '{pad_name}.{section_name}' - fixed LaTeX escaping and spacing"
-
 TOOL_DEFINITIONS = f"""
 AVAILABLE TOOLS:
 
@@ -3133,7 +3022,6 @@ Available pads: output, research, tables, plots, outline, data, log
 - scratchpad_delete(pad_name: str, section_name: str): Delete entire section.
 - scratchpad_merge(pad_name: str, section_names: list[str], new_section_name: str): Merge multiple sections.
 - scratchpad_history(pad_name: str, section_name: str, limit: int = 10): View version history with diffs showing +added and -removed lines.
-- scratchpad_cleanup_formatting(pad_name: str, section_name: str): Fix common formatting issues (LaTeX escaping, spacing). Call after writing content to ensure clean markdown.
 
 **SCRATCHPAD FEATURES:**
 ✅ All changes persisted to scratchpad.db SQLite database
@@ -3161,8 +3049,8 @@ AGENT_PERSONAS = {
     Your team consists of:
     - Tool Agent: Executes searches using search_knowledge_base AND saves findings to RESEARCH pad using scratchpad_write. This is your PRIMARY agent for data gathering and extraction.
     - Query Refiner: ONLY use when searches returned insufficient/irrelevant results. Analyzes what went wrong and creates refined search keywords. NOT for extracting or saving data.
-    - Engineer: Best for creating tables, charts, and structured data visualizations in the TABLES pad. Also handles technical analysis or debugging.
-    - Writer: Best for composing narrative prose sections and refining the final answer. Uses RESEARCH pad data and TABLES pad visualizations to build OUTPUT pad.
+    - Engineer: Best for tasks involving code, technical analysis, or debugging.
+    - Writer: Best for composing, formatting, and refining the final answer to the user. Uses RESEARCH pad data to build OUTPUT pad.
     - Validator: Best for reviewing the work of other agents, checking for factual accuracy, and ensuring the final answer fully addresses the user's question.
     - Supervisor: Best for evaluating if the user's question has been adequately answered and if the team should finish.
 
@@ -3238,57 +3126,35 @@ AGENT_PERSONAS = {
     9.  On every subsequent turn, review the plan and the completed steps. DO NOT repeat tasks.
     10. **BE COMPREHENSIVE BUT ITERATIVE**: Quality over quantity. Better to do 3 searches → extract findings → write → identify gaps → 3 more searches, than to do 15 searches all at once without extraction.
     11. **PROGRESS CHECK**: After 3-4 steps, or when you have gathered significant information, delegate to the Supervisor to evaluate if the question is adequately answered.
-    12. **REFINEMENT WORKFLOW - MANDATORY CONTINUATION**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
-        a) **DO NOT STOP** - the report is incomplete and must continue
-        b) Identify what's missing from Supervisor's feedback (e.g., "missing sections 2, 3, 5, 8-10, 12-13")
-        c) Delegate to Writer to draft the missing sections in parallel (use PARALLEL tasks for multiple sections)
-        d) If data is needed for missing sections, delegate searches to Tool Agent first
-        e) After missing sections are drafted, check with Supervisor again
-        f) **NEVER finish if Supervisor said "NEED_MORE_WORK"** - always continue until Supervisor says "READY_TO_FINISH"
+    12. **REFINEMENT WORKFLOW**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
+        a) Delegate to Query Refiner to analyze what went wrong and create refined search keywords
+        b) Then delegate to Tool Agent with the refined search (or multiple parallel searches)
+        c) Then check with Supervisor again
     13. **VALIDATION WORKFLOW**: If Supervisor says "READY_TO_FINISH":
-        a) **CRITICAL**: DO NOT finish immediately - delegate formatting/polish tasks first
-        b) **CHECK FOR ORPHANED SECTIONS**: Call scratchpad_list("output") and check if ANY sections exist that are NOT part of the final numbered structure. If found, delegate to Writer: "Merge content from orphaned sections [list names] into the appropriate numbered sections in OUTPUT pad"
-        c) Delegate to Writer: "Review OUTPUT pad - read each section, fix any LaTeX escaping ($336billion → $336 billion), add proper markdown headers, ensure clean formatting"
-        d) Delegate to Writer: "Read OUTPUT sections 1-by-1 and add missing paragraph breaks for readability"
-        e) Then delegate to Validator to ensure the answer fully addresses the user's question AND is properly formatted
-        f) If Validator approves, proceed to FINISH
-        g) If Validator identifies issues, address them or refine further
-    14. **TABLES & VISUALIZATIONS PHASE** (before formatting):
-        - **REQUIRED**: For reports with numerical data, delegate to Engineer to create tables BEFORE Writer polishes OUTPUT
-        - Check RESEARCH pad for quantitative data: cost projections, staffing gaps, timelines, comparisons
-        - Delegate to Engineer: "Create tables in TABLES pad for: [list specific data sets that need tabular format]"
-        - Examples: "Create table comparing maintainer shortfalls by service", "Create cost projection table FY2024-2040"
-        - Writer will reference these tables in narrative sections
-    15. **FORMATTING & POLISH PHASE** (after tables are created):
-        - Delegate to Writer: "Review and reformat OUTPUT sections - fix any LaTeX escaping, add narrative transitions between paragraphs, replace bullet-heavy sections with flowing prose"
-        - Call scratchpad_cleanup_formatting() for each OUTPUT section
-        - Ensure Writer integrates tables with narrative: "Refer to Table 1 in section 3, explaining what it shows"
-        - **DO NOT skip this phase** - unformatted or bullet-heavy output is unacceptable
-    16. **WHEN TO FINISH**:
-        - If Supervisor says "READY_TO_FINISH" and OUTPUT pad has comprehensive sections (typically 5+ sections, 5000+ words total), delegate to **"FINISH_NOW"** agent with task: "Read the OUTPUT pad and deliver the final report to the user"
-        - If Validator confirms the final answer is complete AND properly formatted, delegate to **"FINISH_NOW"** agent
-        - **CRITICAL**: The agent name is "FINISH_NOW" not "FINISH" - use exact name
-        - **The final answer given in the "task" field MUST BE STRICTLY GROUNDED IN THE SCRATCHPAD CONTENT. DO NOT ADD SPECULATION OR UNGROUNDED KNOWLEDGE.**
-    17. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
+        a) Delegate to Writer to compile the final answer
+        b) Then delegate to Validator to ensure the answer fully addresses the user's question
+        c) If Validator approves, proceed to FINISH
+        d) If Validator identifies issues, address them or refine further
+    11. If Validator confirms the final answer is complete, delegate to the "FINISH" agent. **The final answer given in the "task" field MUST BE STRICTLY GROUNDED IN THE SCRATCHPAD CONTENT. DO NOT ADD SPECULATION OR UNGROUNDED KNOWLEDGE.**
+    12. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
     """,
 
         "Tool Agent": f"""You are an expert data agent responsible for executing tools and managing scratchpads. You MUST respond in JSON format.
 
-    ═══════════════════════════════════════════════════════════════
-    🚨 PRE-FLIGHT CHECK - READ BEFORE LOOKING AT YOUR TASK 🚨
-    ═══════════════════════════════════════════════════════════════
+    🚨 PRE-FLIGHT CHECK - READ THIS FIRST BEFORE ANALYZING YOUR TASK:
 
-    STEP 1: Check if your task contains THESE EXACT WORDS:
-            "extract"  OR  "from cached"  OR  "save to RESEARCH"
+    IF your task contains ANY of these phrases:
+      • "extract from cached"
+      • "from cached results"
+      • "from cached search"
+      • "save [data/findings/statistics] to RESEARCH"
 
-    STEP 2: If YES → Call scratchpad_write() IMMEDIATELY
-            If NO  → Proceed to CRITICAL INSTRUCTIONS below
+    THEN you MUST:
+      ✅ Call scratchpad_write() tool IMMEDIATELY
+      ❌ DO NOT call get_cached_search_results() - creates infinite loop
+      ❌ DO NOT respond with {{"response": "..."}} - saves nothing
 
-    FORBIDDEN ACTIONS (will create infinite loop):
-      ❌ Calling get_cached_search_results() when task says "extract" or "from cached"
-      ❌ Responding with {{"response": "text"}} when task says "extract" or "save"
-
-    WHY: Orchestrator ALREADY saw search results. Task tells you WHAT to save. Just write it.
+    WHY: The Orchestrator has ALREADY seen the search results. Your task tells you WHAT to save. Just write it to the RESEARCH pad directly.
 
     CRITICAL INSTRUCTIONS:
     1. Analyze the given task from another agent.
@@ -3398,7 +3264,6 @@ AGENT_PERSONAS = {
         - Use ALL available data from RESEARCH, DATA, TABLES pads
     2.  **BUILD INCREMENTALLY** using scratchpad_insert_lines():
         - First: ALWAYS check what's available: scratchpad_list("research") to see all sections
-        - **BEFORE creating new OUTPUT sections**: Call scratchpad_list("output") to see what already exists - you may need to ADD TO or MERGE with existing sections instead of creating duplicates
         - Read relevant sections: scratchpad_read("research", "section_name") for each topic
         - Build OUTPUT progressively as research accumulates:
           * Don't wait for "all research done" - start writing with what's available
@@ -3415,26 +3280,6 @@ AGENT_PERSONAS = {
         - If vendor landscape shows 48 RFI responses, write detailed analysis of all categories
         - Extract EVERY relevant fact, number, date, finding from scratchpads
         - Make content COMPREHENSIVE based on available information
-    3a. **WRITING STYLE - NARRATIVE PROSE (NOT BULLET POINTS)**:
-        - **FORBIDDEN**: Writing reports as bullet-point lists or slides
-        - **REQUIRED**: Write in flowing narrative paragraphs with complete sentences
-        - Use bullet points ONLY for:
-          * Short lists of 3-5 technical specifications
-          * Numbered action items in recommendations sections
-          * Quick-reference data in appendices
-        - For ALL other content, write narrative prose with:
-          * Topic sentences that introduce each paragraph
-          * Supporting details woven into flowing text
-          * Transition sentences connecting paragraphs
-          * Conclusion sentences that tie back to the section theme
-        - **GOOD Example** (narrative prose):
-          "The F-35 program's life-cycle sustainment bill stands at $1.3 trillion through 2077, with manpower accounting for approximately $400 billion—roughly one-third of total Operations & Support costs. This figure eclipses previous tactical-aircraft programs by an order of magnitude and represents the single largest cost driver in the sustainment portfolio. Current per-aircraft manpower costs average $6.8 million for the Air Force, exceeding the $4.1 million affordability target by 67 percent."
-        - **BAD Example** (bullet-heavy):
-          "• Life-cycle O&S: $1.3 trillion
-           • Manpower: $400 billion (33%)
-           • Per-aircraft cost: $6.8M
-           • Target: $4.1M
-           • Overrun: 67%"
     4.  **Example GOOD workflow** (F-35 report):
         - Call 1: Read RESEARCH pad findings
         - Call 2: scratchpad_insert_lines("output", "exec_summary", 3, "The F-35 Manpower Project analyzed 48 vendor responses across 4 solution categories: 13 COTS/SaaS platforms (TRL 8-9), 13 consulting firms, 16 custom-build vendors, and 6 ancillary tools. Industry consensus shows hybrid AI/ML modeling is standard, with data integration cited as the primary technical risk...")
@@ -3444,35 +3289,7 @@ AGENT_PERSONAS = {
         - ❌ Writing only section titles without content
         - ❌ Ignoring data in RESEARCH pad
     6.  **CONTENT RULE**: Only use facts from scratchpads, but use ALL available facts comprehensively.
-    7.  **ITERATIVE REFINEMENT - READ, REVIEW, EDIT**:
-        - **FIRST PASS**: Write initial draft with scratchpad_write()
-        - **SECOND PASS**: Read what you wrote with scratchpad_read() → identify issues
-        - **THIRD PASS**: Fix formatting with scratchpad_replace_lines() or scratchpad_edit()
-        - **FOURTH PASS**: Add missing details with scratchpad_insert_lines()
-        - **DO NOT write once and move on** - always review and refine your own work
-        - **Each section should go through at least 2-3 revision passes**
-        - Use scratchpad_get_lines() to see line numbers for precise edits
-    8.  **FORMATTING RULE - CLEAN MARKDOWN**:
-        - Use proper markdown headers: `# Title`, `## Section`, `### Subsection`
-        - Use NORMAL dollar signs for currency: `$1.5 trillion`, NOT `$1.5trillion` or escaped LaTeX
-        - Add blank lines between sections and paragraphs for readability
-        - Use bullet points (`-` or `*`) for lists, NOT wall-of-text
-        - **FORBIDDEN**: LaTeX-style escaping (`\n`, `$336billion`, `F−35`)
-        - **REQUIRED**: Clean, readable markdown (`$336 billion`, `F-35`)
-        - Format numbers clearly: `3,500–5,000` NOT `3,500–5,000`
-        - **After writing each section**: Read it back, check formatting, fix any issues
-        - **FORMATTING CLEANUP**: After writing a section, call `scratchpad_cleanup_formatting("output", "section_name")` to automatically fix LaTeX escaping and spacing issues
-    8a. **TABLES & VISUALIZATIONS - ALWAYS INCLUDE WHEN APPROPRIATE**:
-        - **REQUIRED**: When writing about numerical data, cost comparisons, timelines, or staffing gaps, you MUST request tables from the Engineer
-        - Delegate to Engineer: "Create a table in TABLES pad showing [specific data]"
-        - Examples when tables are MANDATORY:
-          * Maintainer shortfalls by service → TABLE comparing required vs. assigned billets
-          * Cost projections over time → TABLE showing FY2024, FY2028, FY2032, etc.
-          * Training pipeline throughput → TABLE with current vs. target capacity
-          * Pilot staffing gaps → TABLE by service (USAF, USN, USMC)
-        - After Engineer creates table, reference it in narrative: "Table 1 summarizes maintainer shortfalls..."
-        - **DO NOT embed raw numbers in bullet lists** - use tables for structured data, narrative prose for interpretation
-    9.  **RESPONSE FORMAT**: You MUST respond with a valid JSON object in one of these formats:
+    6.  **RESPONSE FORMAT**: You MUST respond with a valid JSON object in one of these formats:
         - Tool call: {{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "outline", "section_name": "plan", "content": "..."}}}}}}
         - Agent response: {{"response": "Wrote section [name] to OUTPUT pad, lines X-Y"}}
         - Final answer: {{"response": "FINAL_ANSWER_READY - Compiled complete answer in OUTPUT pad"}}
@@ -3511,39 +3328,20 @@ AGENT_PERSONAS = {
         - Can we provide a useful answer with what's been gathered?
         - **Don't require perfect keyword matches - real documents use varied terminology**
     5.  **You do NOT need perfection - assess if there is ADEQUATE or RELATED information to provide a useful answer.**
-    6.  **BEFORE approving READY_TO_FINISH**: Check OUTPUT pad for quality:
-        - Does OUTPUT pad exist and have multiple sections?
-        - Are sections written in narrative prose (NOT bullet-heavy slide format)?
-        - Are dollar amounts readable (e.g., "$336 billion" not "$336billion")?
-        - Are there proper paragraph breaks, transitions, and topic sentences?
-        - Are there tables in TABLES pad for numerical data? If not, delegate to Engineer first
-        - **FORBIDDEN**: Bullet-point-heavy reports that read like slide decks
-        - **REQUIRED**: Flowing narrative paragraphs with complete sentences
-        - If OUTPUT is poorly formatted → Recommend Writer to reformat before finishing
-    7.  Make a decision using JSON format:
-        - If OUTPUT pad has ALL required sections AND properly formatted AND contains tables: Respond with {{"response": "READY_TO_FINISH - The OUTPUT pad contains [X] complete sections covering [topics]. Content is written in proper narrative format with tables and ready for delivery."}}
-        - If OUTPUT pad is MISSING sections: Respond with {{"response": "NEED_MORE_WORK - OUTPUT pad has sections [list what exists] but is MISSING sections [list specific missing sections]. Delegate to Writer to draft: [list specific section numbers/names to create]. Use RESEARCH pad data that already exists."}}
-        - If adequate content BUT bullet-heavy or missing tables: Respond with {{"response": "NEED_MORE_WORK - Content is complete but OUTPUT pad needs formatting. Issues: [specify: bullet-heavy sections, missing tables, LaTeX escaping, etc.]. Delegate to Engineer for tables, then Writer for prose reformatting."}}
-        - If missing critical research data: Respond with {{"response": "NEED_MORE_WORK - RESEARCH pad lacks data for [topics]. Delegate to Tool Agent to search for: [specific topics]. Then delegate to Writer to draft sections once data is available."}}
-    8.  **Bias toward finishing**: If there's ANY substantial related information, recommend finishing. Real answers can include: "Based on available information about [related topic]..." or "While we found information about [what we found], here's what we know..."
-    9.  **Be pragmatic**: Perfect data rarely exists. Work with what we have.""",
+    6.  Make a decision using JSON format:
+        - If adequate/related information exists: Respond with {{"response": "READY_TO_FINISH - The scratchpad contains [describe what was found] which addresses the user's question about [topic]. The Writer should compile the final answer using this information."}}
+        - If truly nothing useful: Respond with {{"response": "NEED_MORE_WORK - After reviewing scratchpad, found [what we have] but missing [critical gaps]. Recommend: [specific next steps that won't just repeat failed searches]"}}
+    7.  **Bias toward finishing**: If there's ANY substantial related information, recommend finishing. Real answers can include: "Based on available information about [related topic]..." or "While we found information about [what we found], here's what we know..."
+    8.  **Be pragmatic**: Perfect data rarely exists. Work with what we have.""",
         
-        "FINISH_NOW": """You are the final answer delivery agent. Your ONLY job is to read the OUTPUT scratchpad and deliver it to the user.
+        "FINISH_NOW": """You are the final summarizer. The agent team has reached its operational limit and must now provide the best possible answer based on the work done so far.
 
     CRITICAL INSTRUCTIONS:
-    1.  First, call scratchpad_list("output") to see all available sections
-    2.  Then call scratchpad_read("output") to retrieve the ENTIRE OUTPUT pad (all sections combined in order)
-    3.  **VERIFY LENGTH**: The OUTPUT should be comprehensive (typically 5,000+ words for research reports). If it's suspiciously short (<500 words), check scratchpad_list("output") again and call scratchpad_read("output", section_name) for each section individually, then concatenate them
-    4.  **DO NOT rewrite, summarize, or modify the content** - the Writer has already polished it
-    5.  **DO NOT add your own commentary** - just deliver what's in OUTPUT pad
-    6.  Return the full OUTPUT pad content as your final response
-    7.  If OUTPUT pad is empty or incomplete, acknowledge this and return what's available
-
-    EXAMPLE WORKFLOW:
-    - Step 1: scratchpad_list("output") → Returns: ['1_executive_summary', '2_introduction', '3_background', ...]
-    - Step 2: scratchpad_read("output") → Returns entire document with all sections
-    - Step 3: Verify output is comprehensive (check word count, section count)
-    - Step 4: Return [exact content from OUTPUT pad, unmodified]"""
+    1.  Review the user's original goal and the entire scratchpad history.
+    2.  Synthesize all the information, tool outputs, and drafts into a coherent final answer.
+    3.  **Acknowledge that the process was stopped before it could be fully completed.**
+    4.  Present the best possible answer based on the gathered information. **DO NOT add speculation or information not present in the scratchpad.**
+    5.  Your response should be a complete and well-formatted final answer to the user."""
     }
 
 # Replacement for execute_tool_call function (around line 1184)
@@ -4267,24 +4065,19 @@ Use all the information above to compile the final answer."""}
                             try:
                                 result = future.result()
                                 task_results.append(result)
-                                # Display progress with VERBOSE details
+                                # Display progress
                                 agent_name = result["agent"]
                                 if result["error"]:
-                                    scratchpad += f"  - ❌ **{agent_name}**: Error - {result['error'][:500]}\n"
+                                    scratchpad += f"  - ❌ **{agent_name}**: Error - {result['error'][:100]}\n"
                                 elif result["tool_call"]:
                                     tool_name = result["tool_call"][0]
-                                    tool_params = result["tool_call"][1]
                                     scratchpad += f"  - 🔧 **{agent_name}**: Calling tool `{tool_name}`\n"
-                                    scratchpad += f"    - **Parameters**: `{json.dumps(tool_params, indent=2)[:1000]}`\n"
                                 else:
                                     scratchpad += f"  - ✓ **{agent_name}**: Completed\n"
-                                    # Show response if available
-                                    if result.get("observation"):
-                                        scratchpad += f"    - **Response**: {result['observation'][:1000]}\n"
                                 log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                             except Exception as e:
                                 logger.error(f"Task execution error: {e}")
-                                scratchpad += f"  - ❌ Error: {str(e)[:500]}\n"
+                                scratchpad += f"  - ❌ Error: {str(e)[:100]}\n"
                                 log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
             else:
@@ -4538,35 +4331,28 @@ Compile the final answer from the information above. Return ONLY the final answe
                     tool_name, params = result["tool_call"]
                     agent_name = result["agent"]
 
-                    # Execute tool with VERBOSE output
-                    colored_tool_call = f"<span style='color:green;'>**{agent_name}** executing tool `{tool_name}`</span>"
+                    # Execute tool
+                    colored_tool_call = f"<span style='color:green;'>**{agent_name}** executing tool `{tool_name}` with parameters: {params}</span>"
                     scratchpad += f"- **Tool Call:** {colored_tool_call}\n"
-                    # Show full parameters (limit to 2000 chars for readability)
-                    scratchpad += f"  - **Parameters:** {json.dumps(params, indent=2)[:2000]}\n"
                     log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
                     try:
                         tool_result_observation = execute_tool_call(tool_name, params)
-                        # Show MUCH MORE of the result (increased from 500 to 3000 chars)
-                        result_display = tool_result_observation[:3000]
-                        if len(tool_result_observation) > 3000:
-                            result_display += f"\n... (truncated, full length: {len(tool_result_observation)} chars)"
-                        scratchpad += f"- **Action Result:** {result_display}\n"
+                        scratchpad += f"- **Action Result:** {tool_result_observation[:500]}...\n"
                         log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                     except Exception as e:
                         logger.error(f"Tool execution error for {agent_name}: {e}")
-                        scratchpad += f"- **Tool Error ({agent_name}):** {str(e)[:500]}\n"
+                        scratchpad += f"- **Tool Error ({agent_name}):** {str(e)[:200]}\n"
                         log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
         elif tool_call_to_execute:
-            # Single sequential execution with VERBOSE output
+            # Single sequential execution
             tool_name, params = tool_call_to_execute
-
-            # Show tool call with readable parameters
-            colored_tool_call = f"<span style='color:green;'>Executing tool `{tool_name}`</span>"
+            tool_name, params = tool_call_to_execute
+            
+            # Aesthetic update for visibility
+            colored_tool_call = f"<span style='color:green;'>Executing tool `{tool_name}` with parameters: {params}</span>"
             scratchpad += f"- **Tool Call:** {colored_tool_call}\n"
-            # Show full parameters (limit to 2000 chars for readability)
-            scratchpad += f"  - **Parameters:** {json.dumps(params, indent=2)[:2000]}\n"
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
             try:
@@ -4670,13 +4456,9 @@ Compile the final answer from the information above. Return ONLY the final answe
                 else:
                     observation = "The agent's action resulted in a long output, which could not be summarized."
 
-        # Add observation to scratchpad (only for single-task execution) with VERBOSE output
+        # Add observation to scratchpad (only for single-task execution)
         if observation:
-            # Show much more detail (increased from implicit short output to 3000 chars)
-            obs_display = observation[:3000]
-            if len(observation) > 3000:
-                obs_display += f"\n... (truncated, full length: {len(observation)} chars)"
-            scratchpad += f"- **Action Result:** {obs_display}\n"
+            scratchpad += f"- **Action Result:** {observation}\n"
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
     # Fallback return outside the loop (should not be reached if FINISH_NOW is working)
@@ -4860,21 +4642,6 @@ with st.sidebar:
                 progress_bar.progress(progress_percent)
                 status_text.text(f"Processing file {idx + 1} of {total_files}: {uploaded_file.name}")
 
-                # Skip duplicates if ingesting to Cosmos
-                if ingest_to_cosmos and st.session_state.upload_target:
-                    exists, existing_items = check_file_exists(st.session_state.upload_target, uploaded_file.name)
-                    if exists:
-                        status = {
-                            "filename": uploaded_file.name,
-                            "ingested_to_cosmos": False,
-                            "chunks": 0,
-                            "doc_type": "Skipped",
-                            "skipped": True,
-                            "reason": f"Duplicate (found {len(existing_items)} existing chunks)"
-                        }
-                        all_statuses.append(status)
-                        continue
-
                 # Process file with comprehensive extraction
                 ingestion_result = process_uploaded_file(uploaded_file)
 
@@ -4918,34 +4685,8 @@ with st.sidebar:
                                     if create_container_if_not_exists("DefianceDB", "ProjectSummaries", partition_key="/projectName"):
                                         structured_uploader = get_cosmos_uploader("DefianceDB", "ProjectSummaries")
                                         if structured_uploader:
-                                            try:
-                                                upload_status = st.empty()
-                                                with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
-                                                    s, f = structured_uploader.upload_chunks([structured_data])
-                                                    if s > 0:
-                                                        upload_status.success(f"✅ Structured data uploaded to DefianceDB/ProjectSummaries")
-                                                        time.sleep(2)
-                                                        upload_status.empty()
-                                                    if f > 0:
-                                                        upload_status.error(f"❌ Failed to upload structured data ({f} failed)")
-                                                        time.sleep(3)
-                                                        upload_status.empty()
-                                            except Exception as e:
-                                                error_status = st.empty()
-                                                error_status.error(f"❌ Error uploading structured data: {e}")
-                                                logger.error(f"Structured data upload error: {e}")
-                                                time.sleep(3)
-                                                error_status.empty()
-                                        else:
-                                            error_status = st.empty()
-                                            error_status.error("❌ Could not get uploader for ProjectSummaries")
-                                            time.sleep(3)
-                                            error_status.empty()
-                                    else:
-                                        error_status = st.empty()
-                                        error_status.error("❌ Failed to create/verify ProjectSummaries container")
-                                        time.sleep(3)
-                                        error_status.empty()
+                                            with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
+                                                structured_uploader.upload_chunks([structured_data])
                         else:
                             error_count += 1
                     else:

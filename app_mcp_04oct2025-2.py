@@ -52,8 +52,6 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-# spaCy not needed - using LLM agents for all extraction
-
 
 # ====================================================================
 # === CORE TOOL IMPLEMENTATION (MANUALLY DEFINED TO BYPASS MCP ISSUE)
@@ -314,18 +312,6 @@ def scratchpad_history(pad_name: str, section_name: str, limit: int = 10) -> str
 
     return output
 
-def scratchpad_cleanup_formatting(pad_name: str, section_name: str) -> str:
-    """
-    Clean common formatting issues in a scratchpad section.
-    Fixes LaTeX escaping, spacing issues, special characters.
-    Call this after writing content to ensure clean markdown.
-    """
-    manager = st.session_state.get("scratchpad_manager")
-    if not manager:
-        return "Error: Scratchpad manager not initialized"
-
-    return manager.cleanup_formatting(pad_name, section_name)
-
 def scratchpad_insert_lines(pad_name: str, section_name: str, line_number: int, content: str) -> str:
     """
     Insert lines at a specific line number in a section (like Claude Code).
@@ -460,44 +446,6 @@ def scratchpad_get_lines(pad_name: str, section_name: str, start_line: int = Non
         numbered = [f"{i+start_line:4d}│ {line}" for i, line in enumerate(selected)]
         return '\n'.join(numbered)
 
-def get_cached_search_results(keywords: List[str] = None) -> str:
-    """
-    Retrieve cached search results from previous loops in this workflow.
-    If keywords are specified, returns results from that specific search.
-    If no keywords specified, returns a summary of all cached searches.
-    """
-    cache = st.session_state.get("loop_results_cache", {})
-
-    if not cache:
-        return "No cached search results available from previous loops."
-
-    if keywords:
-        # Look for specific search by keywords
-        cache_key = f"search_{json.dumps(keywords, sort_keys=True)}_"
-        matching = [k for k in cache.keys() if k.startswith(cache_key)]
-
-        if not matching:
-            return f"No cached results found for keywords: {keywords}"
-
-        # Return the most recent match
-        latest_key = matching[-1]
-        cached_data = cache[latest_key]
-        results = cached_data["results"]
-
-        return f"Cached search results for {keywords}:\n\n{cached_data['summary']}\n\nResults:\n{json.dumps(results, indent=2)}"
-
-    else:
-        # Return summary of all cached searches
-        summary = "## Cached Search Results from Previous Loops\n\n"
-        for idx, (cache_key, data) in enumerate(cache.items(), 1):
-            summary += f"{idx}. **Keywords:** {data['keywords']} (Limit: {data['rank_limit']})\n"
-            summary += f"   - {data['summary']}\n"
-            summary += f"   - Cached at: {data['timestamp']}\n"
-            summary += f"   - Cache key for retrieval: Use keywords {data['keywords']}\n\n"
-
-        summary += "\n**To retrieve full results:** Call `get_cached_search_results(keywords=[...])`"
-        return summary
-
 # Map of tool names to their corresponding functions
 TOOL_FUNCTIONS: Dict[str, Callable] = {
     "calc": calc,
@@ -518,8 +466,6 @@ TOOL_FUNCTIONS: Dict[str, Callable] = {
     "scratchpad_insert_lines": scratchpad_insert_lines,
     "scratchpad_delete_lines": scratchpad_delete_lines,
     "scratchpad_replace_lines": scratchpad_replace_lines,
-    "scratchpad_cleanup_formatting": scratchpad_cleanup_formatting,
-    "get_cached_search_results": get_cached_search_results,
     "scratchpad_get_lines": scratchpad_get_lines,
     "scratchpad_history": scratchpad_history,
 }
@@ -1423,8 +1369,7 @@ def call_vision_model(base64_image: str, prompt_text: str) -> str:
         return f"[VISION_PROCESSING_ERROR: {e}]"
 
 def extract_structured_data(full_text: str, filename: str) -> dict:
-    status_placeholder = st.empty()
-    status_placeholder.info("Extracting structured data from document...")
+    st.info("Extracting structured data from document...")
 
     extraction_schema = {
         "projectName": "string",
@@ -1466,572 +1411,53 @@ def extract_structured_data(full_text: str, filename: str) -> dict:
 
         extracted_data = json.loads(response.choices[0].message.content)
         extracted_data['id'] = f"proj_{uuid.uuid4()}"
-        status_placeholder.success("Successfully extracted structured data.")
-        time.sleep(2)
-        status_placeholder.empty()
+        st.success("Successfully extracted structured data.")
         return extracted_data
 
     except Exception as e:
-        status_placeholder.error(f"Failed to extract structured data: {e}")
-        time.sleep(3)
-        status_placeholder.empty()
+        st.error(f"Failed to extract structured data: {e}")
         return None
 
 
-# ====================================================================
-# === COMPREHENSIVE DOCUMENT CLASSIFICATION AND EXTRACTION
-# ====================================================================
-
-def classify_document_with_llm(full_text: str, filename: str) -> Dict[str, Any]:
-    """
-    Classify document type using LLM analysis.
-    Returns: {"doc_type": str, "confidence": float, "reasoning": str}
-    """
-    system_prompt = """You are an expert document classifier. Analyze the provided document and classify it into ONE of these categories:
-
-DOCUMENT TYPES:
-- RFI_Response: Response to Request for Information from vendors
-- Solicitation: Government RFI, RFP, RFQ, or contract solicitation
-- Technical_Specification: Technical requirements, specifications, standards
-- Project_Plan: Project management documents, timelines, roadmaps
-- Vendor_Proposal: Vendor proposals, capability statements, white papers
-- Meeting_Notes: Meeting minutes, notes, action items
-- Report: Analysis reports, status reports, research findings
-- Contract: Contracts, agreements, statements of work
-- Financial: Budget documents, cost analyses, financial reports
-- Email: Email threads, correspondence
-- Presentation: Slide decks, briefing materials
-- Other: Any document that doesn't fit above categories
-
-Respond in JSON format with:
-{
-  "doc_type": "one of the types above",
-  "confidence": 0.0 to 1.0,
-  "reasoning": "brief explanation of classification"
-}"""
-
+def process_pdf_with_vision(file_bytes: bytes, filename: str) -> List[str]:
+    """Processes a PDF using pymupdf4llm for text and GPT-4.1 Vision for refinement."""
+    page_contents = []
     try:
-        client = st.session_state.gpt41_client
-        model = st.session_state.GPT41_DEPLOYMENT
-
-        # Use first 5000 chars for classification
-        sample_text = full_text[:5000]
-        context = f"FILENAME: '{filename}'\n\nDOCUMENT TEXT:\n---\n{sample_text}\n---"
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0
-        )
-
-        result = json.loads(response.choices[0].message.content)
-        logger.info(f"Document classified as {result.get('doc_type')} with confidence {result.get('confidence')}")
-        return result
-    except Exception as e:
-        logger.error(f"Failed to classify document: {e}")
-        return {"doc_type": "Other", "confidence": 0.0, "reasoning": f"Classification error: {e}"}
-
-
-def extract_comprehensive_metadata_with_llm(full_text: str, filename: str) -> Dict[str, Any]:
-    """
-    Extract comprehensive metadata using LLM analysis instead of spaCy.
-    Extracts entities, dates, monetary values, locations, contacts, technical terms.
-    """
-    system_prompt = """You are an expert metadata extraction AI. Analyze the document text and extract comprehensive metadata in JSON format.
-
-Extract ALL instances of:
-- Organizations (companies, agencies, institutions)
-- Persons (names of people mentioned)
-- Locations (cities, states, countries, facilities)
-- Dates (any date references)
-- Monetary values (costs, budgets, prices)
-- Email addresses
-- Phone numbers
-- Technical terms and acronyms
-- Key metrics and measurements
-
-Be exhaustive - extract EVERY unique instance you find."""
-
-    extraction_schema = {
-        "entities": {
-            "organizations": ["list of all unique organization names"],
-            "persons": ["list of all unique person names"],
-            "locations": ["list of all unique locations"],
-            "dates": ["list of all unique dates mentioned"],
-            "monetary_values": ["list of all monetary amounts with context"],
-            "technical_terms": ["list of technical terms, acronyms, specialized vocabulary"]
-        },
-        "contact_information": {
-            "emails": ["list of all email addresses"],
-            "phones": ["list of all phone numbers"]
-        },
-        "key_metrics": {
-            "measurements": ["list of key measurements and quantities with units"]
-        },
-        "document_statistics": {
-            "document_length": len(full_text),
-            "word_count": len(full_text.split())
-        }
-    }
-
-    try:
-        client = st.session_state.gpt41_client
-        model = st.session_state.GPT41_DEPLOYMENT
-
-        # Use first 25k chars for metadata extraction
-        sample_text = full_text[:25000]
-        context = f"""FILENAME: '{filename}'
-
-DOCUMENT TEXT:
----
-{sample_text}
----
-
-Extract metadata according to this JSON schema:
-{json.dumps(extraction_schema, indent=2)}
-
-Respond with the populated JSON."""
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
-        )
-
-        metadata = json.loads(response.choices[0].message.content)
-        # Ensure document_statistics is included
-        if "document_statistics" not in metadata:
-            metadata["document_statistics"] = {
-                "document_length": len(full_text),
-                "word_count": len(full_text.split())
-            }
-        else:
-            metadata["document_statistics"]["document_length"] = len(full_text)
-            metadata["document_statistics"]["word_count"] = len(full_text.split())
-
-        return metadata
-    except Exception as e:
-        logger.error(f"LLM metadata extraction failed: {e}")
-        # Return minimal metadata on failure
-        return {
-            "entities": {
-                "organizations": [],
-                "persons": [],
-                "locations": [],
-                "dates": [],
-                "monetary_values": [],
-                "technical_terms": []
-            },
-            "contact_information": {
-                "emails": [],
-                "phones": []
-            },
-            "key_metrics": {
-                "measurements": []
-            },
-            "document_statistics": {
-                "document_length": len(full_text),
-                "word_count": len(full_text.split())
-            },
-            "extraction_error": str(e)
-        }
-
-
-def generate_document_summary_with_mapreduce(full_text: str, filename: str, doc_type: str = "Unknown") -> Dict[str, str]:
-    """
-    Generate comprehensive document summary using map-reduce for long documents.
-    Returns: {"executive_summary": str, "key_points": [str], "recommendations": [str]}
-    """
-    client = st.session_state.gpt41_client
-    model = st.session_state.GPT41_DEPLOYMENT
-
-    # Chunk document if long (>15k words)
-    words = full_text.split()
-    word_count = len(words)
-
-    if word_count > 15000:
-        # MAP phase: Summarize chunks
-        chunk_size = 5000  # words per chunk
-        chunk_summaries = []
-
-        for i in range(0, word_count, chunk_size):
-            chunk_words = words[i:i+chunk_size]
-            chunk_text = " ".join(chunk_words)
-
-            map_prompt = f"""Summarize this section of a {doc_type} document in 3-5 bullet points. Focus on key facts, decisions, and actionable items.
-
-SECTION TEXT:
-{chunk_text}
-
-Respond with only the bullet points."""
-
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": map_prompt}],
-                    temperature=0.0,
-                    max_tokens=500
-                )
-                chunk_summary = response.choices[0].message.content
-                chunk_summaries.append(chunk_summary)
-            except Exception as e:
-                logger.warning(f"Failed to summarize chunk {i//chunk_size}: {e}")
-
-        # REDUCE phase: Synthesize chunk summaries
-        combined_summaries = "\n\n".join([f"Section {i+1}:\n{s}" for i, s in enumerate(chunk_summaries)])
-        reduce_prompt = f"""You are analyzing a {doc_type} document that has been pre-summarized in sections. Create a comprehensive final summary.
-
-SECTION SUMMARIES:
-{combined_summaries}
-
-Respond in JSON format:
-{{
-  "executive_summary": "2-3 paragraph overview",
-  "key_points": ["point 1", "point 2", ...],
-  "recommendations": ["rec 1", "rec 2", ...] or [] if none
-}}"""
-
-    else:
-        # Direct summarization for shorter documents
-        reduce_prompt = f"""Analyze this {doc_type} document and create a comprehensive summary.
-
-DOCUMENT TEXT:
-{full_text[:25000]}
-
-Respond in JSON format:
-{{
-  "executive_summary": "2-3 paragraph overview",
-  "key_points": ["point 1", "point 2", ...],
-  "recommendations": ["rec 1", "rec 2", ...] or [] if none
-}}"""
-
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": reduce_prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=2000
-        )
-        summary = json.loads(response.choices[0].message.content)
-        return summary
-    except Exception as e:
-        logger.error(f"Failed to generate summary: {e}")
-        return {
-            "executive_summary": f"Summary generation failed: {e}",
-            "key_points": [],
-            "recommendations": []
-        }
-
-
-def extract_document_schema_by_type(full_text: str, filename: str, doc_type: str) -> Dict[str, Any]:
-    """
-    Extract structured data based on document type using specialized schemas.
-    """
-    # Define extraction schemas by document type
-    schemas = {
-        "RFI_Response": {
-            "vendor_name": "string",
-            "solution_category": "COTS/SaaS, Consulting, Custom-Build, or Ancillary",
-            "technology_readiness_level": "number 1-9",
-            "key_capabilities": ["list of strings"],
-            "pricing_model": "string",
-            "implementation_timeline": "string",
-            "technical_risks": ["list of strings"],
-            "integration_approach": "string"
-        },
-        "Solicitation": {
-            "solicitation_number": "string",
-            "agency": "string",
-            "response_deadline": "ISO 8601 date",
-            "project_scope": "string",
-            "evaluation_criteria": ["list of strings"],
-            "budget_range": "string",
-            "contract_type": "string",
-            "required_certifications": ["list of strings"]
-        },
-        "Technical_Specification": {
-            "specification_title": "string",
-            "version": "string",
-            "requirements": ["list of requirement objects"],
-            "standards_referenced": ["list of strings"],
-            "technical_constraints": ["list of strings"],
-            "performance_metrics": {}
-        },
-        "Vendor_Proposal": {
-            "vendor_name": "string",
-            "proposed_solution": "string",
-            "cost_breakdown": {},
-            "team_composition": ["list of strings"],
-            "past_performance": ["list of projects"],
-            "differentiators": ["list of strings"]
-        }
-    }
-
-    # Get schema for this document type, or use generic if not found
-    schema = schemas.get(doc_type, {
-        "title": "string",
-        "summary": "string",
-        "key_findings": ["list of strings"]
-    })
-
-    system_prompt = f"""You are an expert data extraction AI. Extract structured information from this {doc_type} document.
-
-EXTRACTION SCHEMA:
-{json.dumps(schema, indent=2)}
-
-Rules:
-- Extract ALL fields from the schema
-- Use null for missing information
-- Be precise with dates (ISO 8601 format)
-- Extract complete lists, not just examples
-- Preserve numerical data exactly as stated
-
-Respond with only the populated JSON matching the schema."""
-
-    try:
-        client = st.session_state.gpt41_client
-        model = st.session_state.GPT41_DEPLOYMENT
-
-        # Use first 20k chars to avoid token limits
-        context = f"FILENAME: '{filename}'\nDOC_TYPE: {doc_type}\n\nDOCUMENT TEXT:\n---\n{full_text[:20000]}\n---"
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": context}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
-        )
-
-        extracted = json.loads(response.choices[0].message.content)
-        return extracted
-    except Exception as e:
-        logger.error(f"Schema extraction failed for {doc_type}: {e}")
-        return {"extraction_error": str(e)}
-
-
-def check_ocr_quality(text: str, page_num: int) -> tuple[bool, float]:
-    """
-    Check if OCR quality is poor by analyzing text characteristics.
-    Returns: (needs_ocr: bool, confidence: float)
-    """
-    if not text or len(text.strip()) < 50:
-        return True, 0.0  # Very little text, likely needs OCR
-
-    # Calculate heuristics
-    word_count = len(text.split())
-    char_count = len(text)
-
-    if word_count == 0:
-        return True, 0.0
-
-    avg_word_length = char_count / word_count
-
-    # Check for garbled text indicators
-    special_char_ratio = len(re.findall(r'[^\w\s.,;:!?\-\'"()]', text)) / max(char_count, 1)
-    digit_ratio = len(re.findall(r'\d', text)) / max(char_count, 1)
-
-    # Poor quality indicators:
-    # - Very high special character ratio (>0.3)
-    # - Very short or very long average word length
-    # - Very high digit ratio (>0.5) unless it's a table
-    poor_quality = (
-        special_char_ratio > 0.3 or
-        avg_word_length < 2 or
-        avg_word_length > 15 or
-        (digit_ratio > 0.5 and word_count < 100)
-    )
-
-    # Calculate confidence score (0-1)
-    confidence = 1.0 - min(1.0, special_char_ratio * 2 + abs(avg_word_length - 5) / 10)
-
-    logger.info(f"Page {page_num}: OCR quality check - confidence={confidence:.2f}, needs_ocr={poor_quality}")
-    return poor_quality, confidence
-
-
-def analyze_page_with_comprehensive_vision(base64_image: str, page_num: int, initial_text: str = "") -> Dict[str, Any]:
-    """
-    Comprehensive analysis of a PDF page as an image using Vision API.
-    Identifies text, tables, charts, images, diagrams, and their locations.
-    Returns comprehensive structured data about the page.
-    """
-    vision_prompt = f"""You are an expert document visual analysis AI. Analyze this page image comprehensively and extract ALL information in structured JSON format.
-
-IMPORTANT: Analyze the image completely and identify:
-
-1. **All Text Content**: Extract every piece of text visible on the page
-2. **Tables**: Identify all tables, their structure, headers, and content
-3. **Charts/Graphs**: Identify any charts, graphs, plots (bar charts, line graphs, pie charts, etc.)
-4. **Images/Photos**: Identify any photographs, illustrations, or images
-5. **Diagrams**: Identify technical diagrams, flowcharts, schematics
-6. **Visual Elements**: Headers, footers, logos, watermarks, page numbers
-7. **Layout Information**: Document structure, sections, columns
-8. **Data Relationships**: How visual elements relate to text
-
-Initial text extraction (may have OCR errors):
----
-{initial_text[:2000] if initial_text else "[No initial text - perform complete analysis]"}
----
-
-Respond in JSON format with this structure:
-{{
-  "page_number": {page_num},
-  "full_text_content": "Complete corrected text from the page",
-  "visual_elements": {{
-    "tables": [
-      {{
-        "location": "description of where on page (top/middle/bottom, left/right)",
-        "title": "table title if present",
-        "description": "what the table shows",
-        "row_count": number,
-        "column_count": number,
-        "headers": ["col1", "col2", ...],
-        "content_summary": "brief summary of data",
-        "full_table_text": "complete table text representation"
-      }}
-    ],
-    "charts_and_graphs": [
-      {{
-        "type": "bar chart|line graph|pie chart|scatter plot|etc",
-        "location": "where on page",
-        "title": "chart title",
-        "description": "what it shows",
-        "axis_labels": {{"x": "label", "y": "label"}},
-        "data_points": "description of data shown",
-        "key_findings": "important insights from the chart"
-      }}
-    ],
-    "images_and_photos": [
-      {{
-        "location": "where on page",
-        "description": "detailed description of image",
-        "caption": "image caption if present",
-        "relevance": "how it relates to document content"
-      }}
-    ],
-    "diagrams": [
-      {{
-        "type": "flowchart|schematic|technical diagram|etc",
-        "location": "where on page",
-        "description": "what the diagram shows",
-        "components": ["list", "of", "main", "components"],
-        "relationships": "how components connect"
-      }}
-    ]
-  }},
-  "layout_structure": {{
-    "sections": ["list of sections/headings on page"],
-    "columns": number,
-    "header_text": "header if present",
-    "footer_text": "footer if present",
-    "page_number_shown": "page number if visible"
-  }},
-  "key_information": {{
-    "important_facts": ["key facts from this page"],
-    "numerical_data": ["important numbers with context"],
-    "citations": ["references or citations on page"]
-  }}
-}}
-
-Be thorough and extract EVERYTHING visible on the page."""
-
-    try:
-        client = st.session_state.gpt41_client
-        model = st.session_state.GPT41_DEPLOYMENT
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": vision_prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
-                ]
-            }],
-            response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
-        )
-
-        analysis = json.loads(response.choices[0].message.content)
-        return analysis
-
-    except Exception as e:
-        logger.error(f"Vision analysis failed for page {page_num}: {e}")
-        return {
-            "page_number": page_num,
-            "full_text_content": initial_text or "[Vision analysis failed]",
-            "visual_elements": {
-                "tables": [],
-                "charts_and_graphs": [],
-                "images_and_photos": [],
-                "diagrams": []
-            },
-            "layout_structure": {},
-            "key_information": {},
-            "error": str(e)
-        }
-
-
-def process_pdf_with_vision(file_bytes: bytes, filename: str) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Processes EVERY PDF page as an image using Vision API for comprehensive analysis.
-    Returns: (page_analyses: List[Dict], extraction_metadata: Dict)
-    """
-    page_analyses = []
-    metadata = {
-        "total_pages": 0,
-        "extraction_method": "comprehensive_vision_analysis",
-        "processing_time": None
-    }
-
-    try:
-        import time
-        start_time = time.time()
-
         doc = fitz.open(stream=file_bytes, filetype="pdf")
-        metadata["total_pages"] = len(doc)
-        progress_bar = st.progress(0, text=f"🔍 Comprehensively analyzing {filename}...")
+        progress_bar = st.progress(0, text=f"Analyzing {filename}...")
 
         for i, page in enumerate(doc):
-            progress_text = f"🖼️ Analyzing page {i + 1}/{len(doc)} of {filename} (text, tables, charts, images, diagrams)..."
+            progress_text = f"Processing page {i + 1}/{len(doc)} of {filename}..."
             progress_bar.progress((i + 1) / len(doc), text=progress_text)
 
-            # Get initial text extraction for reference
             md_text = pymupdf4llm.to_markdown(doc, pages=[i], write_images=False)
 
-            # Convert page to image
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("png")
             base64_image = base64.b64encode(img_bytes).decode('utf-8')
 
-            # Comprehensive vision analysis of the page
-            page_analysis = analyze_page_with_comprehensive_vision(base64_image, i + 1, md_text)
-            page_analyses.append(page_analysis)
+            vision_prompt = f"""You are an expert document analysis AI. Review the initial text extracted from a document page and the corresponding page image. Your task is to produce a final, corrected version of the page's content in markdown format.
+
+- Ensure all text from the image is accurately transcribed.
+- Correct any OCR errors or formatting issues from the initial extraction.
+- Preserve the original structure, including paragraphs, lists, and tables.
+- Do NOT add any summary or commentary. Return ONLY the corrected full text from the page.
+
+--- INITIAL EXTRACTED TEXT ---
+{md_text}
+--- END INITIAL TEXT ---
+
+Now, provide the final, corrected markdown based on the attached image."""
+
+            final_content = call_vision_model(base64_image, vision_prompt)
+            page_contents.append(final_content)
 
         progress_bar.empty()
         doc.close()
-
-        metadata["processing_time"] = time.time() - start_time
-        logger.info(f"PDF comprehensive analysis complete: {metadata['total_pages']} pages in {metadata['processing_time']:.1f}s")
-        return page_analyses, metadata
-
+        return page_contents
     except Exception as e:
         st.error(f"Failed to process PDF '{filename}': {e}")
-        return [], {"error": str(e)}
+        return []
 
 
 def process_docx(file_bytes: bytes, paragraphs_per_chunk: int = 15) -> List[str]:
@@ -2059,258 +1485,45 @@ def process_docx(file_bytes: bytes, paragraphs_per_chunk: int = 15) -> List[str]
         st.error(f"Failed to process DOCX file: {e}")
         return []
 
-def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
-    """
-    Comprehensive document processing with classification, extraction, and metadata.
-    Returns: {
-        "chunks": List[str],
-        "doc_type": str,
-        "metadata": Dict,
-        "summary": Dict,
-        "extracted_data": Dict,
-        "processing_metadata": Dict
-    }
-    """
+def process_uploaded_file(uploaded_file):
+    """Dispatcher to process uploaded files based on their type."""
     file_bytes = uploaded_file.getvalue()
     filename = uploaded_file.name
+
+    # Use splitext to reliably get the file extension
     file_ext = os.path.splitext(filename.lower())[1]
 
-    st.info(f"🔍 Starting comprehensive ingestion for '{filename}'...")
-
-    # Step 1: Extract raw text/chunks with comprehensive visual analysis
     if file_ext == ".pdf":
-        page_analyses, processing_metadata = process_pdf_with_vision(file_bytes, filename)
-        # Extract text from comprehensive analyses
-        chunks = [page.get("full_text_content", "") for page in page_analyses]
-        # Store the full page analyses for later use
-        processing_metadata["page_analyses"] = page_analyses
+        return process_pdf_with_vision(file_bytes, filename)
     elif file_ext == ".docx":
-        chunks = process_docx(file_bytes)
-        processing_metadata = {"extraction_method": "python_docx"}
+        return process_docx(file_bytes)
     elif file_ext == ".m4a":
-        chunks = process_m4a(file_bytes, filename)
-        processing_metadata = {"extraction_method": "azure_speech_api"}
+        return process_m4a(file_bytes, filename)
     elif file_ext in [".txt", ".md"]:
-        chunks = process_text_file(file_bytes, filename)
-        processing_metadata = {"extraction_method": "direct_text"}
+        return process_text_file(file_bytes, filename)
     elif file_ext in [".mp3", ".wav"]:
-        chunks = process_audio_generic(file_bytes, filename)
-        processing_metadata = {"extraction_method": "azure_speech_api"}
+        return process_audio_generic(file_bytes, filename)
     else:
-        st.warning(f"Unsupported file type: {filename}")
-        return {
-            "chunks": [],
-            "doc_type": "Unknown",
-            "metadata": {},
-            "summary": {},
-            "extracted_data": {},
-            "processing_metadata": {"error": "Unsupported file type"}
-        }
-
-    if not chunks:
-        st.error(f"No content extracted from '{filename}'")
-        return {
-            "chunks": [],
-            "doc_type": "Unknown",
-            "metadata": {},
-            "summary": {},
-            "extracted_data": {},
-            "processing_metadata": {"error": "No content extracted"}
-        }
-
-    # Step 2: Combine chunks into full text for analysis
-    full_text = "\n\n".join(chunks)
-    st.success(f"✅ Extracted {len(chunks)} chunks ({len(full_text.split())} words)")
-
-    # Step 3: Document classification
-    with st.spinner("📋 Classifying document type..."):
-        classification = classify_document_with_llm(full_text, filename)
-        doc_type = classification.get("doc_type", "Other")
-        st.info(f"📁 Classified as: **{doc_type}** (confidence: {classification.get('confidence', 0):.2f})")
-
-    # Step 4: Extract comprehensive metadata using LLM
-    with st.spinner("🔍 Extracting metadata (entities, dates, etc.)..."):
-        metadata = extract_comprehensive_metadata_with_llm(full_text, filename)
-        entity_summary = []
-        if metadata["entities"]["organizations"]:
-            entity_summary.append(f"{len(metadata['entities']['organizations'])} organizations")
-        if metadata["entities"]["persons"]:
-            entity_summary.append(f"{len(metadata['entities']['persons'])} persons")
-        if metadata["entities"]["dates"]:
-            entity_summary.append(f"{len(metadata['entities']['dates'])} dates")
-        if metadata["entities"]["monetary_values"]:
-            entity_summary.append(f"{len(metadata['entities']['monetary_values'])} monetary values")
-
-        if entity_summary:
-            st.success(f"✅ Extracted: {', '.join(entity_summary)}")
-
-    # Step 5: Generate document summary (map-reduce for long docs)
-    with st.spinner("📝 Generating comprehensive summary..."):
-        summary = generate_document_summary_with_mapreduce(full_text, filename, doc_type)
-        st.success(f"✅ Generated summary with {len(summary.get('key_points', []))} key points")
-
-    # Step 6: Extract structured data by document type
-    with st.spinner(f"📊 Extracting structured data for {doc_type}..."):
-        extracted_data = extract_document_schema_by_type(full_text, filename, doc_type)
-        if "extraction_error" not in extracted_data:
-            st.success(f"✅ Extracted {len(extracted_data)} structured fields")
-
-    # Combine all results with visual analysis data
-    result = {
-        "chunks": chunks,
-        "doc_type": doc_type,
-        "classification": classification,
-        "metadata": metadata,
-        "summary": summary,
-        "extracted_data": extracted_data,
-        "processing_metadata": processing_metadata,
-        "filename": filename,
-        "processed_at": datetime.utcnow().isoformat()
-    }
-
-    # Add comprehensive visual element summary for PDFs
-    if file_ext == ".pdf" and "page_analyses" in processing_metadata:
-        visual_summary = {
-            "total_tables": 0,
-            "total_charts": 0,
-            "total_images": 0,
-            "total_diagrams": 0,
-            "pages_with_tables": [],
-            "pages_with_charts": [],
-            "pages_with_images": [],
-            "pages_with_diagrams": []
-        }
-
-        for page_analysis in processing_metadata["page_analyses"]:
-            page_num = page_analysis.get("page_number", 0)
-            visual_elements = page_analysis.get("visual_elements", {})
-
-            if visual_elements.get("tables"):
-                visual_summary["total_tables"] += len(visual_elements["tables"])
-                visual_summary["pages_with_tables"].append(page_num)
-
-            if visual_elements.get("charts_and_graphs"):
-                visual_summary["total_charts"] += len(visual_elements["charts_and_graphs"])
-                visual_summary["pages_with_charts"].append(page_num)
-
-            if visual_elements.get("images_and_photos"):
-                visual_summary["total_images"] += len(visual_elements["images_and_photos"])
-                visual_summary["pages_with_images"].append(page_num)
-
-            if visual_elements.get("diagrams"):
-                visual_summary["total_diagrams"] += len(visual_elements["diagrams"])
-                visual_summary["pages_with_diagrams"].append(page_num)
-
-        result["visual_elements_summary"] = visual_summary
-
-        # Display summary to user
-        visual_info = []
-        if visual_summary["total_tables"] > 0:
-            visual_info.append(f"{visual_summary['total_tables']} tables")
-        if visual_summary["total_charts"] > 0:
-            visual_info.append(f"{visual_summary['total_charts']} charts/graphs")
-        if visual_summary["total_images"] > 0:
-            visual_info.append(f"{visual_summary['total_images']} images")
-        if visual_summary["total_diagrams"] > 0:
-            visual_info.append(f"{visual_summary['total_diagrams']} diagrams")
-
-        if visual_info:
-            st.success(f"📊 Visual elements identified: {', '.join(visual_info)}")
-
-    st.success(f"🎉 Comprehensive ingestion complete for '{filename}'!")
-    return result
+        st.warning(f"Unsupported file type: {filename}. Please upload a .pdf, .docx, .m4a, .txt, or .md file.")
+        return []
 
 
-def prepare_chunks_for_cosmos(ingestion_result: Dict[str, Any], original_filename: str = None) -> List[Dict[str, Any]]:
-    """
-    Formats comprehensive ingestion results into JSON for Cosmos DB.
-    Now accepts full ingestion_result dict with metadata, summary, etc.
-    For backward compatibility, also accepts old format (list of chunks).
-    """
-    # Handle backward compatibility - if passed a list, convert to old format
-    if isinstance(ingestion_result, list):
-        chunks = ingestion_result
-        parent_doc_id = f"doc_{uuid.uuid4()}"
-        output_chunks = []
-        for i, chunk_content in enumerate(chunks):
-            output_chunks.append({
-                "id": f"{parent_doc_id}_chunk_{i}",
-                "parent_document_id": parent_doc_id,
-                "content": chunk_content,
-                "metadata": {
-                    "original_filename": original_filename,
-                    "chunk_index": i,
-                },
-                "doc_type": "chunk"
-            })
-        return output_chunks
-
-    # New comprehensive format
-    chunks = ingestion_result.get("chunks", [])
-    doc_type = ingestion_result.get("doc_type", "Unknown")
-    classification = ingestion_result.get("classification", {})
-    metadata = ingestion_result.get("metadata", {})
-    summary = ingestion_result.get("summary", {})
-    extracted_data = ingestion_result.get("extracted_data", {})
-    processing_metadata = ingestion_result.get("processing_metadata", {})
-    visual_elements_summary = ingestion_result.get("visual_elements_summary", {})
-    filename = ingestion_result.get("filename", original_filename or "unknown")
-    processed_at = ingestion_result.get("processed_at", datetime.utcnow().isoformat())
-
+def prepare_chunks_for_cosmos(chunks: List[str], original_filename: str) -> List[Dict[str, Any]]:
+    """Formats text chunks into JSON for Cosmos DB ingestion."""
     parent_doc_id = f"doc_{uuid.uuid4()}"
     output_chunks = []
 
-    # Create parent document with comprehensive metadata
-    parent_doc = {
-        "id": parent_doc_id,
-        "doc_type": "parent_document",
-        "filename": filename,
-        "document_type": doc_type,
-        "classification": classification,
-        "summary": summary,
-        "extracted_data": extracted_data,
-        "metadata": metadata,
-        "visual_elements_summary": visual_elements_summary,
-        "processing_metadata": processing_metadata,
-        "processed_at": processed_at,
-        "total_chunks": len(chunks)
-    }
-    output_chunks.append(parent_doc)
-
-    # Get page analyses if available (for PDFs)
-    page_analyses = processing_metadata.get("page_analyses", [])
-
-    # Create chunk documents with references to parent
     for i, chunk_content in enumerate(chunks):
-        chunk_doc = {
+        output_chunks.append({
             "id": f"{parent_doc_id}_chunk_{i}",
             "parent_document_id": parent_doc_id,
             "content": chunk_content,
-            "chunk_index": i,
-            "doc_type": "chunk",
-            "document_type": doc_type,  # Include for filtering
-            "filename": filename,
             "metadata": {
-                "original_filename": filename,
+                "original_filename": original_filename,
                 "chunk_index": i,
-                "document_type": doc_type,
-                "processed_at": processed_at
-            }
-        }
-
-        # Add page-level visual analysis if available
-        if i < len(page_analyses):
-            page_analysis = page_analyses[i]
-            chunk_doc["page_analysis"] = {
-                "page_number": page_analysis.get("page_number"),
-                "visual_elements": page_analysis.get("visual_elements", {}),
-                "layout_structure": page_analysis.get("layout_structure", {}),
-                "key_information": page_analysis.get("key_information", {})
-            }
-
-        output_chunks.append(chunk_doc)
-
-    logger.info(f"Prepared {len(output_chunks)} documents for Cosmos (1 parent + {len(chunks)} chunks with visual analysis)")
+            },
+            "doc_type": "chunk"
+        })
     return output_chunks
 
 def chunk_text(full_text: str, sentences_per_chunk: int = 10) -> List[str]:
@@ -2609,7 +1822,7 @@ def transcribe_m4a_audio(file_bytes: bytes) -> str:
         return ""
 
 # =========================== MULTI-AGENT FRAMEWORK ===========================
-MAX_LOOPS = 50  # Increased from 20 to allow for complete, comprehensive reports
+MAX_LOOPS = 20
 
 # =========================== SCRATCHPAD MANAGER ===========================
 class ScratchpadManager:
@@ -2914,48 +2127,7 @@ class ScratchpadManager:
             return pad_data["error"]
 
         sections = pad_data.get("sections", {})
-
-        # Sort sections: numbered sections first (1_, 2_, etc.), then others alphabetically
-        def sort_key(item):
-            name = item[0]
-            # Extract leading number if present (e.g., "1_exec_summary" → 1)
-            if name and name[0].isdigit():
-                num_part = ""
-                for char in name:
-                    if char.isdigit():
-                        num_part += char
-                    else:
-                        break
-                return (0, int(num_part))  # Priority 0 for numbered, sort by number
-            else:
-                return (1, name)  # Priority 1 for non-numbered, sort alphabetically
-
-        sorted_sections = sorted(sections.items(), key=sort_key)
-
-        # Deduplicate: prefer numbered sections over non-numbered versions
-        # E.g., if both "1_executive_summary" and "Executive Summary" exist, keep only "1_executive_summary"
-        seen_topics = set()
-        deduplicated = []
-        for name, content in sorted_sections:
-            # Normalize name to detect duplicates: "1_executive_summary" → "executive summary"
-            normalized = name.lower().lstrip('0123456789_').replace('_', ' ').strip()
-
-            if normalized not in seen_topics:
-                seen_topics.add(normalized)
-                deduplicated.append((name, content))
-            # If normalized topic already seen, skip (prefer numbered version which comes first)
-
-        # Don't add section name as header if content already starts with a header
-        parts = []
-        for name, content in deduplicated:
-            if content.strip().startswith('#'):
-                # Content already has headers, don't add section name
-                parts.append(content)
-            else:
-                # Content doesn't have headers, add section name as header
-                parts.append(f"## {name}\n{content}")
-
-        return "\n\n".join(parts)
+        return "\n\n".join([f"## {name}\n{content}" for name, content in sections.items()])
 
     def get_all_pads_summary(self) -> str:
         """Get a summary of all scratchpads and their sections"""
@@ -3034,64 +2206,11 @@ class ScratchpadManager:
         conn.close()
         return True
 
-    def cleanup_formatting(self, pad_name: str, section_name: str) -> str:
-        """
-        Clean common formatting issues in a section (LaTeX escaping, spacing).
-
-        Fixes:
-        - LaTeX-style dollar escaping: $1.3trillion → $1.3 trillion
-        - Escaped special chars: F−35 → F-35
-        - Missing spaces after punctuation
-        - Multiple consecutive spaces
-
-        Args:
-            pad_name: Name of the pad
-            section_name: Name of the section to clean
-
-        Returns:
-            Status message with diff showing changes
-        """
-        content = self.read_section(pad_name, section_name)
-        if not content or "Error:" in content:
-            return f"❌ Cannot clean - section not found: {pad_name}.{section_name}"
-
-        original = content
-
-        # Fix common LaTeX escaping issues
-        import re
-
-        # Fix dollar amounts: $1.3trillion → $1.3 trillion
-        content = re.sub(r'\$(\d+\.?\d*)(billion|trillion|million)', r'$\1 \2', content)
-
-        # Fix escaped minus signs: F−35 → F-35 (U+2212 to hyphen-minus)
-        content = content.replace('−', '-')
-
-        # Fix escaped newlines in content
-        content = content.replace('\\n', '\n')
-
-        # Fix multiple spaces
-        content = re.sub(r'  +', ' ', content)
-
-        # Fix space before punctuation
-        content = re.sub(r' ([.,;:])', r'\1', content)
-
-        # Fix missing space after punctuation (but not in numbers like "1.3" or URLs)
-        content = re.sub(r'([.,;:])([A-Za-z])', r'\1 \2', content)
-
-        if content == original:
-            return f"✅ Section '{pad_name}.{section_name}' already clean - no changes needed"
-
-        # Write cleaned content back
-        self.write_section(pad_name, section_name, content, mode="replace", agent_name="Formatter")
-
-        return f"✅ Cleaned formatting in '{pad_name}.{section_name}' - fixed LaTeX escaping and spacing"
-
 TOOL_DEFINITIONS = f"""
 AVAILABLE TOOLS:
 
 **Data & Search:**
-- search_knowledge_base(keywords: list[str], semantic_query_text: str, rank_limit: int): Executes a **broad keyword search** against the knowledge base (RAG). **Keywords are combined with OR logic.** Use this to find documents or data points. Results are automatically cached for later retrieval.
-- get_cached_search_results(keywords: list[str] = None): Retrieve search results from previous loops. If keywords specified, returns that specific search. If no keywords, returns summary of all cached searches. **USE THIS to access results from searches done in earlier loops.**
+- search_knowledge_base(keywords: list[str], semantic_query_text: str, rank_limit: int): Executes a **broad keyword search** against the knowledge base (RAG). **Keywords are combined with OR logic.** Use this to find documents or data points.
 
 **Math & Conversion:**
 - calc(expression: str): Safely evaluates a mathematical expression (e.g., "12 * (3 + 5)").
@@ -3133,7 +2252,6 @@ Available pads: output, research, tables, plots, outline, data, log
 - scratchpad_delete(pad_name: str, section_name: str): Delete entire section.
 - scratchpad_merge(pad_name: str, section_names: list[str], new_section_name: str): Merge multiple sections.
 - scratchpad_history(pad_name: str, section_name: str, limit: int = 10): View version history with diffs showing +added and -removed lines.
-- scratchpad_cleanup_formatting(pad_name: str, section_name: str): Fix common formatting issues (LaTeX escaping, spacing). Call after writing content to ensure clean markdown.
 
 **SCRATCHPAD FEATURES:**
 ✅ All changes persisted to scratchpad.db SQLite database
@@ -3159,10 +2277,10 @@ AGENT_PERSONAS = {
         "Orchestrator": """You are an expert project manager and orchestrator. Your role is to understand the user's goal and guide your team of specialist agents to achieve it.
 
     Your team consists of:
-    - Tool Agent: Executes searches using search_knowledge_base AND saves findings to RESEARCH pad using scratchpad_write. This is your PRIMARY agent for data gathering and extraction.
-    - Query Refiner: ONLY use when searches returned insufficient/irrelevant results. Analyzes what went wrong and creates refined search keywords. NOT for extracting or saving data.
-    - Engineer: Best for creating tables, charts, and structured data visualizations in the TABLES pad. Also handles technical analysis or debugging.
-    - Writer: Best for composing narrative prose sections and refining the final answer. Uses RESEARCH pad data and TABLES pad visualizations to build OUTPUT pad.
+    - Tool Agent: Executes actual database searches using search_knowledge_base tool. NEVER ask Tool Agent to "simulate" searches - it has access to real data!
+    - Query Refiner: Analyzes existing search results and refines queries to get more targeted, relevant information.
+    - Engineer: Best for tasks involving code, technical analysis, or debugging.
+    - Writer: Best for composing, formatting, and refining the final answer to the user.
     - Validator: Best for reviewing the work of other agents, checking for factual accuracy, and ensuring the final answer fully addresses the user's question.
     - Supervisor: Best for evaluating if the user's question has been adequately answered and if the team should finish.
 
@@ -3188,32 +2306,6 @@ AGENT_PERSONAS = {
           * Multiple information needs identified → ALL should be searched in parallel
           * Report writing task → Delegate multiple parallel searches to gather ALL needed data at once
         - **FORBIDDEN**: Sequential searches when parallel searches would work. ALWAYS delegate 3+ parallel tasks for comprehensive requests.
-    5.  **PROPER WORKFLOW SEQUENCING - CRITICAL**:
-        - **Phase 1 - Research**: Tool Agent searches → Tool Agent MUST save findings to RESEARCH pad
-        - **Phase 2 - Writing**: Writer reads RESEARCH pad → Writer builds OUTPUT using scratchpad_insert_lines
-        - **NEVER**: Let Writer create empty placeholder sections
-        - **NEVER**: Skip the "save to RESEARCH pad" step between searching and writing
-        - **Correct sequence example**:
-          * Loop 1: Delegate 5 parallel searches to Tool Agent
-          * Loop 2: Verify Tool Agent saved results to RESEARCH pad (if not, tell Tool Agent to save them)
-          * Loop 3: Delegate to Writer to read RESEARCH and build OUTPUT with real content
-        - **Wrong sequence (DO NOT DO THIS)**:
-          * ❌ Tool Agent searches → Writer immediately writes without saved research
-          * ❌ Writer creates empty sections like scratchpad_write("research", "section", "")
-    6.  **CRITICAL: ENFORCE SEARCH→SAVE WORKFLOW**:
-        - **CHECK CACHED SEARCH RESULTS SECTION**: You can see previews of all searches from previous loops
-        - **FORBIDDEN**: Delegating more searches immediately after searches (Loop N: search → Loop N+1: search ❌)
-        - **REQUIRED**: After searches, extract findings (Loop N: search → Loop N+1: extract & save meaningful results ✅)
-        - **Adaptive approach - You can SEE the data**:
-          * Look at "CACHED SEARCH RESULTS" section above - it shows you what each search found
-          * If search preview shows useful data → Delegate "Extract [specific insights] from the cached results and save to RESEARCH pad with section name [topic]"
-          * If search preview shows nothing useful → Skip that search, don't delegate extraction
-          * Focus on MEANINGFUL content based on what you can see in the previews
-        - **Example adaptive workflow**:
-          * Loop 1: Delegate 4 searches to **Tool Agent**
-          * Loop 2: Review "CACHED SEARCH RESULTS" section → See maintainer and cost searches returned useful data → Delegate to **Tool Agent**: "Save maintainer shortage statistics to RESEARCH.maintainer_shortage - found 15% shortage, readiness 54%" + "Save cost projections to RESEARCH.costs - lifecycle $1.3T"
-          * Loop 3: Check RESEARCH pad → 2 sections saved → Delegate **Writer** to start building OUTPUT with available data
-          * Loop 4: Writer adds to OUTPUT → Review for gaps → Delegate more targeted searches to **Tool Agent** if needed
         - **Example parallel delegation**:
           ```json
           {{"agent": "PARALLEL", "tasks": [
@@ -3224,71 +2316,27 @@ AGENT_PERSONAS = {
             {{"agent": "Writer", "task": "Create outline structure in OUTLINE pad"}}
           ]}}
           ```
-    7.  **ITERATIVE WORKFLOW - BUILD AS YOU GO**:
-        a) Start with core searches (3-5 most important topics)
-        b) As results come in, delegate extraction of meaningful findings
-        c) As RESEARCH pad fills, delegate Writer to start building OUTPUT with available data
-        d) Review OUTPUT → Identify gaps → Delegate targeted searches for gaps
-        e) Continue iterating: more research → more writing → identify new gaps → more searches
-        f) **Don't wait for "all research complete"** - build continuously
-    8.  If the scratchpads are empty or only contain the user's goal, your FIRST STEP is to:
-        a) Analyze the user's question and identify core information needs (start with 3-5, not 10+)
-        b) Delegate parallel searches to Tool Agent for core topics
+    5.  If the scratchpads are empty or only contain the user's goal, your FIRST STEP is to:
+        a) Analyze the user's question and identify ALL information needs
+        b) Delegate multiple parallel searches to Tool Agent (one for each information need)
         c) Optionally delegate to Writer to create outline in parallel
-    9.  On every subsequent turn, review the plan and the completed steps. DO NOT repeat tasks.
-    10. **BE COMPREHENSIVE BUT ITERATIVE**: Quality over quantity. Better to do 3 searches → extract findings → write → identify gaps → 3 more searches, than to do 15 searches all at once without extraction.
-    11. **PROGRESS CHECK**: After 3-4 steps, or when you have gathered significant information, delegate to the Supervisor to evaluate if the question is adequately answered.
-    12. **REFINEMENT WORKFLOW - MANDATORY CONTINUATION**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
-        a) **DO NOT STOP** - the report is incomplete and must continue
-        b) Identify what's missing from Supervisor's feedback (e.g., "missing sections 2, 3, 5, 8-10, 12-13")
-        c) Delegate to Writer to draft the missing sections in parallel (use PARALLEL tasks for multiple sections)
-        d) If data is needed for missing sections, delegate searches to Tool Agent first
-        e) After missing sections are drafted, check with Supervisor again
-        f) **NEVER finish if Supervisor said "NEED_MORE_WORK"** - always continue until Supervisor says "READY_TO_FINISH"
-    13. **VALIDATION WORKFLOW**: If Supervisor says "READY_TO_FINISH":
-        a) **CRITICAL**: DO NOT finish immediately - delegate formatting/polish tasks first
-        b) **CHECK FOR ORPHANED SECTIONS**: Call scratchpad_list("output") and check if ANY sections exist that are NOT part of the final numbered structure. If found, delegate to Writer: "Merge content from orphaned sections [list names] into the appropriate numbered sections in OUTPUT pad"
-        c) Delegate to Writer: "Review OUTPUT pad - read each section, fix any LaTeX escaping ($336billion → $336 billion), add proper markdown headers, ensure clean formatting"
-        d) Delegate to Writer: "Read OUTPUT sections 1-by-1 and add missing paragraph breaks for readability"
-        e) Then delegate to Validator to ensure the answer fully addresses the user's question AND is properly formatted
-        f) If Validator approves, proceed to FINISH
-        g) If Validator identifies issues, address them or refine further
-    14. **TABLES & VISUALIZATIONS PHASE** (before formatting):
-        - **REQUIRED**: For reports with numerical data, delegate to Engineer to create tables BEFORE Writer polishes OUTPUT
-        - Check RESEARCH pad for quantitative data: cost projections, staffing gaps, timelines, comparisons
-        - Delegate to Engineer: "Create tables in TABLES pad for: [list specific data sets that need tabular format]"
-        - Examples: "Create table comparing maintainer shortfalls by service", "Create cost projection table FY2024-2040"
-        - Writer will reference these tables in narrative sections
-    15. **FORMATTING & POLISH PHASE** (after tables are created):
-        - Delegate to Writer: "Review and reformat OUTPUT sections - fix any LaTeX escaping, add narrative transitions between paragraphs, replace bullet-heavy sections with flowing prose"
-        - Call scratchpad_cleanup_formatting() for each OUTPUT section
-        - Ensure Writer integrates tables with narrative: "Refer to Table 1 in section 3, explaining what it shows"
-        - **DO NOT skip this phase** - unformatted or bullet-heavy output is unacceptable
-    16. **WHEN TO FINISH**:
-        - If Supervisor says "READY_TO_FINISH" and OUTPUT pad has comprehensive sections (typically 5+ sections, 5000+ words total), delegate to **"FINISH_NOW"** agent with task: "Read the OUTPUT pad and deliver the final report to the user"
-        - If Validator confirms the final answer is complete AND properly formatted, delegate to **"FINISH_NOW"** agent
-        - **CRITICAL**: The agent name is "FINISH_NOW" not "FINISH" - use exact name
-        - **The final answer given in the "task" field MUST BE STRICTLY GROUNDED IN THE SCRATCHPAD CONTENT. DO NOT ADD SPECULATION OR UNGROUNDED KNOWLEDGE.**
-    17. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
+    6.  On every subsequent turn, review the plan and the completed steps. DO NOT repeat tasks.
+    7.  **BE MAXIMALLY COMPREHENSIVE**: The goal is comprehensive results, not token efficiency. When in doubt, delegate MORE parallel tasks, not fewer.
+    8.  **PROGRESS CHECK**: After 3-4 steps, or when you have gathered significant information, delegate to the Supervisor to evaluate if the question is adequately answered.
+    9.  **REFINEMENT WORKFLOW**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
+        a) Delegate to Query Refiner to analyze what went wrong and create refined search keywords
+        b) Then delegate to Tool Agent with the refined search (or multiple parallel searches)
+        c) Then check with Supervisor again
+    10. **VALIDATION WORKFLOW**: If Supervisor says "READY_TO_FINISH":
+        a) Delegate to Writer to compile the final answer
+        b) Then delegate to Validator to ensure the answer fully addresses the user's question
+        c) If Validator approves, proceed to FINISH
+        d) If Validator identifies issues, address them or refine further
+    11. If Validator confirms the final answer is complete, delegate to the "FINISH" agent. **The final answer given in the "task" field MUST BE STRICTLY GROUNDED IN THE SCRATCHPAD CONTENT. DO NOT ADD SPECULATION OR UNGROUNDED KNOWLEDGE.**
+    12. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
     """,
 
         "Tool Agent": f"""You are an expert data agent responsible for executing tools and managing scratchpads. You MUST respond in JSON format.
-
-    ═══════════════════════════════════════════════════════════════
-    🚨 PRE-FLIGHT CHECK - READ BEFORE LOOKING AT YOUR TASK 🚨
-    ═══════════════════════════════════════════════════════════════
-
-    STEP 1: Check if your task contains THESE EXACT WORDS:
-            "extract"  OR  "from cached"  OR  "save to RESEARCH"
-
-    STEP 2: If YES → Call scratchpad_write() IMMEDIATELY
-            If NO  → Proceed to CRITICAL INSTRUCTIONS below
-
-    FORBIDDEN ACTIONS (will create infinite loop):
-      ❌ Calling get_cached_search_results() when task says "extract" or "from cached"
-      ❌ Responding with {{"response": "text"}} when task says "extract" or "save"
-
-    WHY: Orchestrator ALREADY saw search results. Task tells you WHAT to save. Just write it.
 
     CRITICAL INSTRUCTIONS:
     1. Analyze the given task from another agent.
@@ -3298,55 +2346,26 @@ AGENT_PERSONAS = {
        - NEVER create fake/simulated search results, documents, URLs, or data
        - When asked to "retrieve" or "search" for information, you MUST use search_knowledge_base tool
        - When asked to "simulate" searches, IGNORE that and do REAL searches instead
-    4. **CRITICAL: WHEN TASK SAYS "EXTRACT" OR "FROM CACHED SEARCH" - CALL SCRATCHPAD_WRITE, NEVER RESPOND WITH TEXT**:
-       - **FORBIDDEN**: Responding with {{"response": "extracted data..."}} - this does NOT save to RESEARCH pad
-       - **FORBIDDEN**: Calling get_cached_search_results() - creates infinite loop
-       - **REQUIRED**: Call scratchpad_write() tool with a meaningful section name and extracted content
-       - **The Orchestrator has ALREADY seen the search results** in their "CACHED SEARCH RESULTS" section
-       - **Your task describes WHAT they saw** that's worth saving
-       - **If task is vague** (e.g., "extract statistics"): Create a reasonable section name like "shortage_statistics" or "training_data" and write what would be relevant
-       - **Example**:
-         * Task: "From cached search on maintenance manpower, extract current staffing levels and gaps"
-         * **CORRECT**: {{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "maintenance_staffing", "content": "F-35 Maintenance Manpower Status:\\n- Current manning gaps identified\\n- Maintenance personnel requirements for sustainment\\n- Staffing levels analysis needed", "mode": "replace"}}}}}}
-         * **WRONG**: {{"response": "I've extracted the staffing data"}} - this saves NOTHING!
-       - **Even if you're unsure of exact data**: Write SOMETHING to RESEARCH pad based on task description, don't just respond with text
-    5. **EXTRACT MEANINGFUL FINDINGS - QUALITY OVER QUANTITY**:
-       - **When writing to RESEARCH pad**: Extract and synthesize key insights, don't dump raw data
-       - **FORBIDDEN**: Saving everything mechanically without analysis
-       - **FORBIDDEN**: Saving empty content like "" or "placeholder" or "Found some results"
-       - **REQUIRED**: Extract and synthesize key insights:
-         * Key facts, statistics, numbers, percentages
-         * Important dates, timelines, deadlines
-         * Organization names, person names, locations
-         * Problems identified, solutions proposed
-         * Costs, budgets, monetary values
-         * Technical details, requirements, specifications
-         * Quotes and important statements
-       - **Adaptive approach**:
-         * If task indicates nothing useful found → Respond with {{"response": "No useful data to save from that search"}}
-         * If task indicates rich data → Save to focused section name (e.g., "vendor_analysis", "cost_projections", "training_gaps")
-         * If task indicates partial data → Save what's useful with note about gaps
-
-    6. **RESPONSE FORMAT - TOOL CALLS ONLY, NEVER TEXT RESPONSES**:
-       - You MUST respond with: `{{"tool_use": {{"name": "tool_name", "params": {{"arg1": "value1", ...}}}}}}`
-       - **FORBIDDEN**: {{"response": "I extracted..."}} or {{"response": "Data saved"}} or ANY text-only response
-       - **WHY**: Text responses don't execute tools. Only tool_use format actually saves to scratchpads.
-       - **If task says "extract"**: You MUST call scratchpad_write tool, not respond with text
-       - **If task says "search"**: You MUST call search_knowledge_base tool, not respond with text
-       - **No exceptions**: ALWAYS use tool_use format, NEVER use response format
+    4. **MANDATORY SCRATCHPAD SAVING**:
+       - **AFTER EVERY SEARCH**: You MUST immediately follow up by saving results to RESEARCH pad
+       - **TWO-STEP PROCESS**:
+         Step 1: Execute search_knowledge_base
+         Step 2: IMMEDIATELY use scratchpad_write to save summary of results to RESEARCH pad
+       - For current task: Use search_knowledge_base, then your NEXT response must use scratchpad_write
+       - Example workflow:
+         * First response: `{{"tool_use": {{"name": "search_knowledge_base", ...}}}}`
+         * Next loop response: `{{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "findings_{{topic}}", "content": "{{extracted_key_facts}}", "mode": "append"}}}}}}`
+       - Extract KEY FACTS, NUMBERS, DATES, FINDINGS from search results
+       - Write structured, detailed content (not "Found 10 results" - write the actual findings!)
+    5. You MUST respond with ONLY a JSON object: `{{"tool_use": {{"name": "tool_name", "params": {{"arg1": "value1", ...}}}}}}`
 
     EXAMPLES:
     - Search task: `{{"tool_use": {{"name": "search_knowledge_base", "params": {{"keywords": ["F-35", "manpower"], "semantic_query_text": "F-35 manpower project sustainment workforce", "rank_limit": 10}}}}}}`
-    - Extract task (with data): `{{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "vendor_responses", "content": "**F-35 Manpower RFI Results:**\\n- 48 vendor responses received\\n- 13 COTS/SaaS platforms (TRL 8-9)\\n- 13 consulting firms\\n- 16 custom AI/ML solutions\\n- Key challenge: data integration", "mode": "replace"}}}}}}`
-    - Extract task (no useful data): `{{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "log", "section_name": "search_gaps", "content": "Search on [topic] returned generic executive summaries only. No specific manpower data found. Need more targeted keywords.", "mode": "append"}}}}}}`
+    - Save to scratchpad: `{{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "findings", "content": "Found 10 documents...", "mode": "append"}}}}}}`
+    - Create table: `{{"tool_use": {{"name": "to_markdown_table", "params": {{"rows": [{{"name": "X", "value": 10}}]}}}}}}`
+    - Then save: `{{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "tables", "section_name": "results_table", "content": "[table_output]", "mode": "replace"}}}}}}`
 
     REMEMBER: You have access to a real knowledge base with actual documents. ALWAYS search it instead of making up information.
-
-    **ITERATIVE WORKFLOW**:
-    - Search → Cache (automatic)
-    - Extract meaningful findings from cache → Save to RESEARCH pad
-    - Review RESEARCH pad → Identify gaps → Search for gaps
-    - Build OUTPUT incrementally as findings accumulate
 
     {TOOL_DEFINITIONS}""", # Keep TOOL_DEFINITIONS for reference
 
@@ -3391,50 +2410,19 @@ AGENT_PERSONAS = {
     CRITICAL INSTRUCTIONS - COMPREHENSIVE CONTENT REQUIRED:
     1.  **WRITE FULL, DETAILED CONTENT** - NOT placeholder text:
         - FORBIDDEN: "This section provides an overview..." (too vague)
-        - FORBIDDEN: Creating empty sections with scratchpad_write("research", "section", "")
-        - FORBIDDEN: Writing just section headers without content
         - REQUIRED: Full paragraphs with specific facts, numbers, dates from RESEARCH pad
         - Each section should be 3-10 paragraphs with substantive content
         - Use ALL available data from RESEARCH, DATA, TABLES pads
     2.  **BUILD INCREMENTALLY** using scratchpad_insert_lines():
-        - First: ALWAYS check what's available: scratchpad_list("research") to see all sections
-        - **BEFORE creating new OUTPUT sections**: Call scratchpad_list("output") to see what already exists - you may need to ADD TO or MERGE with existing sections instead of creating duplicates
-        - Read relevant sections: scratchpad_read("research", "section_name") for each topic
-        - Build OUTPUT progressively as research accumulates:
-          * Don't wait for "all research done" - start writing with what's available
-          * Use scratchpad_insert_lines("output", "section_name", line_num, "content") to add paragraphs iteratively
-          * As more research arrives, use scratchpad_insert_lines() to add new findings at appropriate locations
-          * Use scratchpad_replace_lines() to refine sections when new data contradicts or enriches earlier content
-        - ADAPTIVE approach:
-          * If RESEARCH has 2-3 sections → Start writing introduction and any sections with data
-          * If RESEARCH gains new sections → Expand existing OUTPUT sections or add new ones
-          * Keep building until comprehensive - don't wait for "complete" research
-        - If RESEARCH pad is empty, STOP and respond: {{"response": "Cannot write - RESEARCH pad is empty. Need Tool Agent to gather data first."}}
+        - First: Read RESEARCH pad to get all available facts
+        - Then: Build content section by section, paragraph by paragraph
+        - Use scratchpad_insert_lines() to add 1-2 paragraphs at a time
+        - NEVER write just titles or one-sentence placeholders
     3.  **COMPREHENSIVE CONTENT RULE**:
         - If RESEARCH pad has 10 bullet points, your section must incorporate ALL 10
         - If vendor landscape shows 48 RFI responses, write detailed analysis of all categories
         - Extract EVERY relevant fact, number, date, finding from scratchpads
         - Make content COMPREHENSIVE based on available information
-    3a. **WRITING STYLE - NARRATIVE PROSE (NOT BULLET POINTS)**:
-        - **FORBIDDEN**: Writing reports as bullet-point lists or slides
-        - **REQUIRED**: Write in flowing narrative paragraphs with complete sentences
-        - Use bullet points ONLY for:
-          * Short lists of 3-5 technical specifications
-          * Numbered action items in recommendations sections
-          * Quick-reference data in appendices
-        - For ALL other content, write narrative prose with:
-          * Topic sentences that introduce each paragraph
-          * Supporting details woven into flowing text
-          * Transition sentences connecting paragraphs
-          * Conclusion sentences that tie back to the section theme
-        - **GOOD Example** (narrative prose):
-          "The F-35 program's life-cycle sustainment bill stands at $1.3 trillion through 2077, with manpower accounting for approximately $400 billion—roughly one-third of total Operations & Support costs. This figure eclipses previous tactical-aircraft programs by an order of magnitude and represents the single largest cost driver in the sustainment portfolio. Current per-aircraft manpower costs average $6.8 million for the Air Force, exceeding the $4.1 million affordability target by 67 percent."
-        - **BAD Example** (bullet-heavy):
-          "• Life-cycle O&S: $1.3 trillion
-           • Manpower: $400 billion (33%)
-           • Per-aircraft cost: $6.8M
-           • Target: $4.1M
-           • Overrun: 67%"
     4.  **Example GOOD workflow** (F-35 report):
         - Call 1: Read RESEARCH pad findings
         - Call 2: scratchpad_insert_lines("output", "exec_summary", 3, "The F-35 Manpower Project analyzed 48 vendor responses across 4 solution categories: 13 COTS/SaaS platforms (TRL 8-9), 13 consulting firms, 16 custom-build vendors, and 6 ancillary tools. Industry consensus shows hybrid AI/ML modeling is standard, with data integration cited as the primary technical risk...")
@@ -3444,35 +2432,7 @@ AGENT_PERSONAS = {
         - ❌ Writing only section titles without content
         - ❌ Ignoring data in RESEARCH pad
     6.  **CONTENT RULE**: Only use facts from scratchpads, but use ALL available facts comprehensively.
-    7.  **ITERATIVE REFINEMENT - READ, REVIEW, EDIT**:
-        - **FIRST PASS**: Write initial draft with scratchpad_write()
-        - **SECOND PASS**: Read what you wrote with scratchpad_read() → identify issues
-        - **THIRD PASS**: Fix formatting with scratchpad_replace_lines() or scratchpad_edit()
-        - **FOURTH PASS**: Add missing details with scratchpad_insert_lines()
-        - **DO NOT write once and move on** - always review and refine your own work
-        - **Each section should go through at least 2-3 revision passes**
-        - Use scratchpad_get_lines() to see line numbers for precise edits
-    8.  **FORMATTING RULE - CLEAN MARKDOWN**:
-        - Use proper markdown headers: `# Title`, `## Section`, `### Subsection`
-        - Use NORMAL dollar signs for currency: `$1.5 trillion`, NOT `$1.5trillion` or escaped LaTeX
-        - Add blank lines between sections and paragraphs for readability
-        - Use bullet points (`-` or `*`) for lists, NOT wall-of-text
-        - **FORBIDDEN**: LaTeX-style escaping (`\n`, `$336billion`, `F−35`)
-        - **REQUIRED**: Clean, readable markdown (`$336 billion`, `F-35`)
-        - Format numbers clearly: `3,500–5,000` NOT `3,500–5,000`
-        - **After writing each section**: Read it back, check formatting, fix any issues
-        - **FORMATTING CLEANUP**: After writing a section, call `scratchpad_cleanup_formatting("output", "section_name")` to automatically fix LaTeX escaping and spacing issues
-    8a. **TABLES & VISUALIZATIONS - ALWAYS INCLUDE WHEN APPROPRIATE**:
-        - **REQUIRED**: When writing about numerical data, cost comparisons, timelines, or staffing gaps, you MUST request tables from the Engineer
-        - Delegate to Engineer: "Create a table in TABLES pad showing [specific data]"
-        - Examples when tables are MANDATORY:
-          * Maintainer shortfalls by service → TABLE comparing required vs. assigned billets
-          * Cost projections over time → TABLE showing FY2024, FY2028, FY2032, etc.
-          * Training pipeline throughput → TABLE with current vs. target capacity
-          * Pilot staffing gaps → TABLE by service (USAF, USN, USMC)
-        - After Engineer creates table, reference it in narrative: "Table 1 summarizes maintainer shortfalls..."
-        - **DO NOT embed raw numbers in bullet lists** - use tables for structured data, narrative prose for interpretation
-    9.  **RESPONSE FORMAT**: You MUST respond with a valid JSON object in one of these formats:
+    6.  **RESPONSE FORMAT**: You MUST respond with a valid JSON object in one of these formats:
         - Tool call: {{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "outline", "section_name": "plan", "content": "..."}}}}}}
         - Agent response: {{"response": "Wrote section [name] to OUTPUT pad, lines X-Y"}}
         - Final answer: {{"response": "FINAL_ANSWER_READY - Compiled complete answer in OUTPUT pad"}}
@@ -3511,39 +2471,20 @@ AGENT_PERSONAS = {
         - Can we provide a useful answer with what's been gathered?
         - **Don't require perfect keyword matches - real documents use varied terminology**
     5.  **You do NOT need perfection - assess if there is ADEQUATE or RELATED information to provide a useful answer.**
-    6.  **BEFORE approving READY_TO_FINISH**: Check OUTPUT pad for quality:
-        - Does OUTPUT pad exist and have multiple sections?
-        - Are sections written in narrative prose (NOT bullet-heavy slide format)?
-        - Are dollar amounts readable (e.g., "$336 billion" not "$336billion")?
-        - Are there proper paragraph breaks, transitions, and topic sentences?
-        - Are there tables in TABLES pad for numerical data? If not, delegate to Engineer first
-        - **FORBIDDEN**: Bullet-point-heavy reports that read like slide decks
-        - **REQUIRED**: Flowing narrative paragraphs with complete sentences
-        - If OUTPUT is poorly formatted → Recommend Writer to reformat before finishing
-    7.  Make a decision using JSON format:
-        - If OUTPUT pad has ALL required sections AND properly formatted AND contains tables: Respond with {{"response": "READY_TO_FINISH - The OUTPUT pad contains [X] complete sections covering [topics]. Content is written in proper narrative format with tables and ready for delivery."}}
-        - If OUTPUT pad is MISSING sections: Respond with {{"response": "NEED_MORE_WORK - OUTPUT pad has sections [list what exists] but is MISSING sections [list specific missing sections]. Delegate to Writer to draft: [list specific section numbers/names to create]. Use RESEARCH pad data that already exists."}}
-        - If adequate content BUT bullet-heavy or missing tables: Respond with {{"response": "NEED_MORE_WORK - Content is complete but OUTPUT pad needs formatting. Issues: [specify: bullet-heavy sections, missing tables, LaTeX escaping, etc.]. Delegate to Engineer for tables, then Writer for prose reformatting."}}
-        - If missing critical research data: Respond with {{"response": "NEED_MORE_WORK - RESEARCH pad lacks data for [topics]. Delegate to Tool Agent to search for: [specific topics]. Then delegate to Writer to draft sections once data is available."}}
-    8.  **Bias toward finishing**: If there's ANY substantial related information, recommend finishing. Real answers can include: "Based on available information about [related topic]..." or "While we found information about [what we found], here's what we know..."
-    9.  **Be pragmatic**: Perfect data rarely exists. Work with what we have.""",
+    6.  Make a decision using JSON format:
+        - If adequate/related information exists: Respond with {{"response": "READY_TO_FINISH - The scratchpad contains [describe what was found] which addresses the user's question about [topic]. The Writer should compile the final answer using this information."}}
+        - If truly nothing useful: Respond with {{"response": "NEED_MORE_WORK - After reviewing scratchpad, found [what we have] but missing [critical gaps]. Recommend: [specific next steps that won't just repeat failed searches]"}}
+    7.  **Bias toward finishing**: If there's ANY substantial related information, recommend finishing. Real answers can include: "Based on available information about [related topic]..." or "While we found information about [what we found], here's what we know..."
+    8.  **Be pragmatic**: Perfect data rarely exists. Work with what we have.""",
         
-        "FINISH_NOW": """You are the final answer delivery agent. Your ONLY job is to read the OUTPUT scratchpad and deliver it to the user.
+        "FINISH_NOW": """You are the final summarizer. The agent team has reached its operational limit and must now provide the best possible answer based on the work done so far.
 
     CRITICAL INSTRUCTIONS:
-    1.  First, call scratchpad_list("output") to see all available sections
-    2.  Then call scratchpad_read("output") to retrieve the ENTIRE OUTPUT pad (all sections combined in order)
-    3.  **VERIFY LENGTH**: The OUTPUT should be comprehensive (typically 5,000+ words for research reports). If it's suspiciously short (<500 words), check scratchpad_list("output") again and call scratchpad_read("output", section_name) for each section individually, then concatenate them
-    4.  **DO NOT rewrite, summarize, or modify the content** - the Writer has already polished it
-    5.  **DO NOT add your own commentary** - just deliver what's in OUTPUT pad
-    6.  Return the full OUTPUT pad content as your final response
-    7.  If OUTPUT pad is empty or incomplete, acknowledge this and return what's available
-
-    EXAMPLE WORKFLOW:
-    - Step 1: scratchpad_list("output") → Returns: ['1_executive_summary', '2_introduction', '3_background', ...]
-    - Step 2: scratchpad_read("output") → Returns entire document with all sections
-    - Step 3: Verify output is comprehensive (check word count, section count)
-    - Step 4: Return [exact content from OUTPUT pad, unmodified]"""
+    1.  Review the user's original goal and the entire scratchpad history.
+    2.  Synthesize all the information, tool outputs, and drafts into a coherent final answer.
+    3.  **Acknowledge that the process was stopped before it could be fully completed.**
+    4.  Present the best possible answer based on the gathered information. **DO NOT add speculation or information not present in the scratchpad.**
+    5.  Your response should be a complete and well-formatted final answer to the user."""
     }
 
 # Replacement for execute_tool_call function (around line 1184)
@@ -3615,18 +2556,6 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         result_summary = f"Found {len(all_results)} result(s) across {len(selected_kbs)} knowledge base(s)."
         if errors:
             result_summary += f" Errors: {'; '.join(errors)}"
-
-        # Cache the results for access in future loops
-        cache_key = f"search_{json.dumps(keywords, sort_keys=True)}_{rank_limit}"
-        if "loop_results_cache" in st.session_state:
-            st.session_state.loop_results_cache[cache_key] = {
-                "tool": "search_knowledge_base",
-                "keywords": keywords,
-                "rank_limit": rank_limit,
-                "results": all_results,
-                "summary": result_summary,
-                "timestamp": datetime.now().isoformat()
-            }
 
         return f"Tool Observation: {result_summary}\n\nQuery: {sql_query}\n\nResults:\n{json.dumps(all_results, indent=2)}"
 
@@ -3831,13 +2760,6 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
     if "stop_generation" not in st.session_state:
         st.session_state.stop_generation = False
 
-    # Initialize loop results cache for this workflow run
-    # This allows agents to access tool results from previous loops
-    if "loop_results_cache" not in st.session_state:
-        st.session_state.loop_results_cache = {}
-    # Clear cache for fresh workflow
-    st.session_state.loop_results_cache = {}
-
     # Initialize or reinitialize scratchpad manager
     # Scratchpads should be unique per conversation, not persist across chats
     current_chat_id = st.session_state.user_data.get("active_conversation_id", "default")
@@ -3923,17 +2845,6 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
 
         scratchpad_summary = scratchpad_mgr.get_all_pads_summary()
 
-        # Get cached search results summary
-        cached_searches_summary = ""
-        if "loop_results_cache" in st.session_state and st.session_state.loop_results_cache:
-            cached_searches_summary = "## Cached Search Results from Previous Loops\n\n"
-            for idx, (cache_key, data) in enumerate(st.session_state.loop_results_cache.items(), 1):
-                cached_searches_summary += f"{idx}. **Keywords:** {data['keywords']}\n"
-                cached_searches_summary += f"   - {data['summary']}\n"
-                cached_searches_summary += f"   - Results preview: {str(data['results'][:2])[:200]}...\n\n"  # Show first 2 results preview
-        else:
-            cached_searches_summary = "No cached search results yet.\n"
-
         # Get full content from key pads (will be truncated if too long)
         research_content = scratchpad_mgr.get_full_content("research")[:context_limit_chars["research"]]
         outline_content = scratchpad_mgr.get_full_content("outline")[:context_limit_chars["outline"]]
@@ -3954,9 +2865,6 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
 
 **SCRATCHPAD SUMMARY:**
 {scratchpad_summary}
-
-**CACHED SEARCH RESULTS:**
-{cached_searches_summary}
 
 **RESEARCH PAD:**
 {research_content if research_content else "(empty)"}
@@ -4267,24 +3175,19 @@ Use all the information above to compile the final answer."""}
                             try:
                                 result = future.result()
                                 task_results.append(result)
-                                # Display progress with VERBOSE details
+                                # Display progress
                                 agent_name = result["agent"]
                                 if result["error"]:
-                                    scratchpad += f"  - ❌ **{agent_name}**: Error - {result['error'][:500]}\n"
+                                    scratchpad += f"  - ❌ **{agent_name}**: Error - {result['error'][:100]}\n"
                                 elif result["tool_call"]:
                                     tool_name = result["tool_call"][0]
-                                    tool_params = result["tool_call"][1]
                                     scratchpad += f"  - 🔧 **{agent_name}**: Calling tool `{tool_name}`\n"
-                                    scratchpad += f"    - **Parameters**: `{json.dumps(tool_params, indent=2)[:1000]}`\n"
                                 else:
                                     scratchpad += f"  - ✓ **{agent_name}**: Completed\n"
-                                    # Show response if available
-                                    if result.get("observation"):
-                                        scratchpad += f"    - **Response**: {result['observation'][:1000]}\n"
                                 log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                             except Exception as e:
                                 logger.error(f"Task execution error: {e}")
-                                scratchpad += f"  - ❌ Error: {str(e)[:500]}\n"
+                                scratchpad += f"  - ❌ Error: {str(e)[:100]}\n"
                                 log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
             else:
@@ -4538,35 +3441,28 @@ Compile the final answer from the information above. Return ONLY the final answe
                     tool_name, params = result["tool_call"]
                     agent_name = result["agent"]
 
-                    # Execute tool with VERBOSE output
-                    colored_tool_call = f"<span style='color:green;'>**{agent_name}** executing tool `{tool_name}`</span>"
+                    # Execute tool
+                    colored_tool_call = f"<span style='color:green;'>**{agent_name}** executing tool `{tool_name}` with parameters: {params}</span>"
                     scratchpad += f"- **Tool Call:** {colored_tool_call}\n"
-                    # Show full parameters (limit to 2000 chars for readability)
-                    scratchpad += f"  - **Parameters:** {json.dumps(params, indent=2)[:2000]}\n"
                     log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
                     try:
                         tool_result_observation = execute_tool_call(tool_name, params)
-                        # Show MUCH MORE of the result (increased from 500 to 3000 chars)
-                        result_display = tool_result_observation[:3000]
-                        if len(tool_result_observation) > 3000:
-                            result_display += f"\n... (truncated, full length: {len(tool_result_observation)} chars)"
-                        scratchpad += f"- **Action Result:** {result_display}\n"
+                        scratchpad += f"- **Action Result:** {tool_result_observation[:500]}...\n"
                         log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                     except Exception as e:
                         logger.error(f"Tool execution error for {agent_name}: {e}")
-                        scratchpad += f"- **Tool Error ({agent_name}):** {str(e)[:500]}\n"
+                        scratchpad += f"- **Tool Error ({agent_name}):** {str(e)[:200]}\n"
                         log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
         elif tool_call_to_execute:
-            # Single sequential execution with VERBOSE output
+            # Single sequential execution
             tool_name, params = tool_call_to_execute
-
-            # Show tool call with readable parameters
-            colored_tool_call = f"<span style='color:green;'>Executing tool `{tool_name}`</span>"
+            tool_name, params = tool_call_to_execute
+            
+            # Aesthetic update for visibility
+            colored_tool_call = f"<span style='color:green;'>Executing tool `{tool_name}` with parameters: {params}</span>"
             scratchpad += f"- **Tool Call:** {colored_tool_call}\n"
-            # Show full parameters (limit to 2000 chars for readability)
-            scratchpad += f"  - **Parameters:** {json.dumps(params, indent=2)[:2000]}\n"
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
             try:
@@ -4670,13 +3566,9 @@ Compile the final answer from the information above. Return ONLY the final answe
                 else:
                     observation = "The agent's action resulted in a long output, which could not be summarized."
 
-        # Add observation to scratchpad (only for single-task execution) with VERBOSE output
+        # Add observation to scratchpad (only for single-task execution)
         if observation:
-            # Show much more detail (increased from implicit short output to 3000 chars)
-            obs_display = observation[:3000]
-            if len(observation) > 3000:
-                obs_display += f"\n... (truncated, full length: {len(observation)} chars)"
-            scratchpad += f"- **Action Result:** {obs_display}\n"
+            scratchpad += f"- **Action Result:** {observation}\n"
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
     # Fallback return outside the loop (should not be reached if FINISH_NOW is working)
@@ -4859,38 +3751,12 @@ with st.sidebar:
                 progress_percent = (idx / total_files)
                 progress_bar.progress(progress_percent)
                 status_text.text(f"Processing file {idx + 1} of {total_files}: {uploaded_file.name}")
-
-                # Skip duplicates if ingesting to Cosmos
-                if ingest_to_cosmos and st.session_state.upload_target:
-                    exists, existing_items = check_file_exists(st.session_state.upload_target, uploaded_file.name)
-                    if exists:
-                        status = {
-                            "filename": uploaded_file.name,
-                            "ingested_to_cosmos": False,
-                            "chunks": 0,
-                            "doc_type": "Skipped",
-                            "skipped": True,
-                            "reason": f"Duplicate (found {len(existing_items)} existing chunks)"
-                        }
-                        all_statuses.append(status)
-                        continue
-
-                # Process file with comprehensive extraction
-                ingestion_result = process_uploaded_file(uploaded_file)
-
-                # Extract chunks for backward compatibility
-                chunks = ingestion_result.get("chunks", []) if isinstance(ingestion_result, dict) else ingestion_result
+                with st.spinner(f"Processing '{uploaded_file.name}'..."):
+                    chunks = process_uploaded_file(uploaded_file)
 
                 if chunks:
                     all_chunks.extend(chunks)
-
-                    # Enhanced status with doc type and metadata
-                    status = {
-                        "filename": uploaded_file.name,
-                        "ingested_to_cosmos": ingest_to_cosmos,
-                        "chunks": len(chunks),
-                        "doc_type": ingestion_result.get("doc_type", "Unknown") if isinstance(ingestion_result, dict) else "Unknown"
-                    }
+                    status = {"filename": uploaded_file.name, "ingested_to_cosmos": ingest_to_cosmos, "chunks": len(chunks)}
                     all_statuses.append(status)
 
                     if ingest_to_cosmos:
@@ -4899,8 +3765,7 @@ with st.sidebar:
                             rag_uploader = get_cosmos_uploader(db_name, cont_name)
                             if rag_uploader:
                                 with st.spinner(f"Ingesting '{uploaded_file.name}' to '{st.session_state.upload_target}'..."):
-                                    # Pass full ingestion result to prepare_chunks_for_cosmos
-                                    cosmos_chunks = prepare_chunks_for_cosmos(ingestion_result, uploaded_file.name)
+                                    cosmos_chunks = prepare_chunks_for_cosmos(chunks, uploaded_file.name)
                                     s, f = rag_uploader.upload_chunks(cosmos_chunks)
                                     status["chunks_succeeded"] = s
                                     status["chunks_failed"] = f
@@ -4911,41 +3776,14 @@ with st.sidebar:
                                     else:
                                         success_count += 1
 
-                                # Get full text for legacy structured data extraction
                                 full_text = "\n".join(c for c in chunks if c)
                                 structured_data = extract_structured_data(full_text, uploaded_file.name)
                                 if structured_data:
                                     if create_container_if_not_exists("DefianceDB", "ProjectSummaries", partition_key="/projectName"):
                                         structured_uploader = get_cosmos_uploader("DefianceDB", "ProjectSummaries")
                                         if structured_uploader:
-                                            try:
-                                                upload_status = st.empty()
-                                                with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
-                                                    s, f = structured_uploader.upload_chunks([structured_data])
-                                                    if s > 0:
-                                                        upload_status.success(f"✅ Structured data uploaded to DefianceDB/ProjectSummaries")
-                                                        time.sleep(2)
-                                                        upload_status.empty()
-                                                    if f > 0:
-                                                        upload_status.error(f"❌ Failed to upload structured data ({f} failed)")
-                                                        time.sleep(3)
-                                                        upload_status.empty()
-                                            except Exception as e:
-                                                error_status = st.empty()
-                                                error_status.error(f"❌ Error uploading structured data: {e}")
-                                                logger.error(f"Structured data upload error: {e}")
-                                                time.sleep(3)
-                                                error_status.empty()
-                                        else:
-                                            error_status = st.empty()
-                                            error_status.error("❌ Could not get uploader for ProjectSummaries")
-                                            time.sleep(3)
-                                            error_status.empty()
-                                    else:
-                                        error_status = st.empty()
-                                        error_status.error("❌ Failed to create/verify ProjectSummaries container")
-                                        time.sleep(3)
-                                        error_status.empty()
+                                            with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
+                                                structured_uploader.upload_chunks([structured_data])
                         else:
                             error_count += 1
                     else:

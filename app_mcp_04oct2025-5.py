@@ -1423,8 +1423,7 @@ def call_vision_model(base64_image: str, prompt_text: str) -> str:
         return f"[VISION_PROCESSING_ERROR: {e}]"
 
 def extract_structured_data(full_text: str, filename: str) -> dict:
-    status_placeholder = st.empty()
-    status_placeholder.info("Extracting structured data from document...")
+    st.info("Extracting structured data from document...")
 
     extraction_schema = {
         "projectName": "string",
@@ -1466,15 +1465,11 @@ def extract_structured_data(full_text: str, filename: str) -> dict:
 
         extracted_data = json.loads(response.choices[0].message.content)
         extracted_data['id'] = f"proj_{uuid.uuid4()}"
-        status_placeholder.success("Successfully extracted structured data.")
-        time.sleep(2)
-        status_placeholder.empty()
+        st.success("Successfully extracted structured data.")
         return extracted_data
 
     except Exception as e:
-        status_placeholder.error(f"Failed to extract structured data: {e}")
-        time.sleep(3)
-        status_placeholder.empty()
+        st.error(f"Failed to extract structured data: {e}")
         return None
 
 
@@ -4860,21 +4855,6 @@ with st.sidebar:
                 progress_bar.progress(progress_percent)
                 status_text.text(f"Processing file {idx + 1} of {total_files}: {uploaded_file.name}")
 
-                # Skip duplicates if ingesting to Cosmos
-                if ingest_to_cosmos and st.session_state.upload_target:
-                    exists, existing_items = check_file_exists(st.session_state.upload_target, uploaded_file.name)
-                    if exists:
-                        status = {
-                            "filename": uploaded_file.name,
-                            "ingested_to_cosmos": False,
-                            "chunks": 0,
-                            "doc_type": "Skipped",
-                            "skipped": True,
-                            "reason": f"Duplicate (found {len(existing_items)} existing chunks)"
-                        }
-                        all_statuses.append(status)
-                        continue
-
                 # Process file with comprehensive extraction
                 ingestion_result = process_uploaded_file(uploaded_file)
 
@@ -4918,34 +4898,8 @@ with st.sidebar:
                                     if create_container_if_not_exists("DefianceDB", "ProjectSummaries", partition_key="/projectName"):
                                         structured_uploader = get_cosmos_uploader("DefianceDB", "ProjectSummaries")
                                         if structured_uploader:
-                                            try:
-                                                upload_status = st.empty()
-                                                with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
-                                                    s, f = structured_uploader.upload_chunks([structured_data])
-                                                    if s > 0:
-                                                        upload_status.success(f"✅ Structured data uploaded to DefianceDB/ProjectSummaries")
-                                                        time.sleep(2)
-                                                        upload_status.empty()
-                                                    if f > 0:
-                                                        upload_status.error(f"❌ Failed to upload structured data ({f} failed)")
-                                                        time.sleep(3)
-                                                        upload_status.empty()
-                                            except Exception as e:
-                                                error_status = st.empty()
-                                                error_status.error(f"❌ Error uploading structured data: {e}")
-                                                logger.error(f"Structured data upload error: {e}")
-                                                time.sleep(3)
-                                                error_status.empty()
-                                        else:
-                                            error_status = st.empty()
-                                            error_status.error("❌ Could not get uploader for ProjectSummaries")
-                                            time.sleep(3)
-                                            error_status.empty()
-                                    else:
-                                        error_status = st.empty()
-                                        error_status.error("❌ Failed to create/verify ProjectSummaries container")
-                                        time.sleep(3)
-                                        error_status.empty()
+                                            with st.spinner(f"Ingesting summary for '{uploaded_file.name}'..."):
+                                                structured_uploader.upload_chunks([structured_data])
                         else:
                             error_count += 1
                     else:
