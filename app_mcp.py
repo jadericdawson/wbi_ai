@@ -2075,7 +2075,10 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
     filename = uploaded_file.name
     file_ext = os.path.splitext(filename.lower())[1]
 
-    st.info(f"🔍 Starting comprehensive ingestion for '{filename}'...")
+    start_msg = st.empty()
+    start_msg.info(f"🔍 Starting comprehensive ingestion for '{filename}'...")
+    time.sleep(1)
+    start_msg.empty()
 
     # Step 1: Extract raw text/chunks with comprehensive visual analysis
     if file_ext == ".pdf":
@@ -2120,13 +2123,19 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
 
     # Step 2: Combine chunks into full text for analysis
     full_text = "\n\n".join(chunks)
-    st.success(f"✅ Extracted {len(chunks)} chunks ({len(full_text.split())} words)")
+    chunk_msg = st.empty()
+    chunk_msg.success(f"✅ Extracted {len(chunks)} chunks ({len(full_text.split())} words)")
+    time.sleep(1.5)
+    chunk_msg.empty()
 
     # Step 3: Document classification
     with st.spinner("📋 Classifying document type..."):
         classification = classify_document_with_llm(full_text, filename)
         doc_type = classification.get("doc_type", "Other")
-        st.info(f"📁 Classified as: **{doc_type}** (confidence: {classification.get('confidence', 0):.2f})")
+        class_msg = st.empty()
+        class_msg.info(f"📁 Classified as: **{doc_type}** (confidence: {classification.get('confidence', 0):.2f})")
+        time.sleep(1.5)
+        class_msg.empty()
 
     # Step 4: Extract comprehensive metadata using LLM
     with st.spinner("🔍 Extracting metadata (entities, dates, etc.)..."):
@@ -2142,18 +2151,27 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
             entity_summary.append(f"{len(metadata['entities']['monetary_values'])} monetary values")
 
         if entity_summary:
-            st.success(f"✅ Extracted: {', '.join(entity_summary)}")
+            entity_msg = st.empty()
+            entity_msg.success(f"✅ Extracted: {', '.join(entity_summary)}")
+            time.sleep(1.5)
+            entity_msg.empty()
 
     # Step 5: Generate document summary (map-reduce for long docs)
     with st.spinner("📝 Generating comprehensive summary..."):
         summary = generate_document_summary_with_mapreduce(full_text, filename, doc_type)
-        st.success(f"✅ Generated summary with {len(summary.get('key_points', []))} key points")
+        summary_msg = st.empty()
+        summary_msg.success(f"✅ Generated summary with {len(summary.get('key_points', []))} key points")
+        time.sleep(1.5)
+        summary_msg.empty()
 
     # Step 6: Extract structured data by document type
     with st.spinner(f"📊 Extracting structured data for {doc_type}..."):
         extracted_data = extract_document_schema_by_type(full_text, filename, doc_type)
         if "extraction_error" not in extracted_data:
-            st.success(f"✅ Extracted {len(extracted_data)} structured fields")
+            struct_msg = st.empty()
+            struct_msg.success(f"✅ Extracted {len(extracted_data)} structured fields")
+            time.sleep(1.5)
+            struct_msg.empty()
 
     # Combine all results with visual analysis data
     result = {
@@ -2215,9 +2233,15 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
             visual_info.append(f"{visual_summary['total_diagrams']} diagrams")
 
         if visual_info:
-            st.success(f"📊 Visual elements identified: {', '.join(visual_info)}")
+            visual_msg = st.empty()
+            visual_msg.success(f"📊 Visual elements identified: {', '.join(visual_info)}")
+            time.sleep(1.5)
+            visual_msg.empty()
 
-    st.success(f"🎉 Comprehensive ingestion complete for '{filename}'!")
+    complete_msg = st.empty()
+    complete_msg.success(f"🎉 Comprehensive ingestion complete for '{filename}'!")
+    time.sleep(2)
+    complete_msg.empty()
     return result
 
 
