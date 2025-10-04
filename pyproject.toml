@@ -1,0 +1,22 @@
+[project]
+name = "actor-critic-mcp"
+version = "0.3.0"
+description = "Actor–Critic AI Team MCP Server (Azure GPT-4.1, DeepSeek, AI Projects)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp[cli]>=1.12.0",                  # allow current MCP SDK
+  "httpx>=0.27",
+  "python-dotenv>=1.0",
+  "azure-identity>=1.17.0",
+  "openai>=1.51.0",
+  "azure-ai-inference>=1.0.0b6",      # allow latest inference SDK
+  "azure-ai-projects>=1.0.0",         # latest stable version :contentReference[oaicite:3]{index=3}
+  "starlette>=0.37.2",
+  "uvicorn>=0.30.0",
+  "neo4j>=5.21.0",                     # if using neo4j_tools
+  "pandas>=2.2.2"                      # for CSV/dict manipulations
+]
+
+
+
