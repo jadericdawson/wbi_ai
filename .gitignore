@@ -45,3 +45,18 @@ IDE / Editor specific
 OS specific
 .DS_Store
 Thumbs.db
+
+# Ignore files with dates in name (e.g., app_mcp_04oct2025.py)
+*[0-9][0-9][0-9][0-9]*
+*20[0-9][0-9]*
+*-[0-9][0-9]-[0-9][0-9]*
+
+# Ignore files with "copy" in name
+*copy*
+*Copy*
+
+# Ignore all markdown documentation files
+*.md
+
+# Ignore specific utility files
+indent_fix.py
