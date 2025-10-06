@@ -38,6 +38,9 @@ Databases
 *.sqlite3
 scratchpad.db
 
+# Environment variables and secrets
+.env
+
 IDE / Editor specific
 .idea/
 .vscode/
