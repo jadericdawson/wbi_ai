@@ -32,13 +32,17 @@ jobs:
           source antenv/bin/activate
           pip install -r requirements.txt
                 
-      # Include the virtual environment in deployment since Oryx build is not running on Azure
+      # Exclude virtual environment - let Azure's Oryx build it with compatible libraries
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
         with:
           name: python-app
           path: |
             .
+            !antenv/
+            !venv/
+            !__pycache__/
+            !*.pyc
 
       # 🚫 Opting Out of Oryx Build
       # If you prefer to disable the Oryx build process during deployment, follow these steps:
