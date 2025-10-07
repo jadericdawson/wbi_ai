@@ -345,18 +345,16 @@ def scratchpad_insert_lines(pad_name: str, section_name: str, line_number: int, 
     if not manager:
         return "Error: Scratchpad manager not initialized"
 
-    if pad_name not in manager.pads:
-        return f"Error: Scratchpad '{pad_name}' does not exist"
+    # Use database method to read existing content
+    existing = manager.read_section(pad_name, section_name)
 
-    if section_name not in manager.pads[pad_name]["sections"]:
-        # Create new section if it doesn't exist
-        manager.pads[pad_name]["sections"][section_name] = content
-        manager.pads[pad_name]["metadata"]["last_modified"] = time.time()
-        manager._rebuild_content(pad_name)
+    # If section doesn't exist, create it with initial content
+    if "Error:" in existing:
+        result = manager.write_section(pad_name, section_name, content, mode="replace", agent_name="system")
+        _trigger_output_refresh(pad_name)
         return f"Created new section '{pad_name}.{section_name}' with content"
 
-    existing = manager.pads[pad_name]["sections"][section_name]
-    lines = existing.split('\n')
+    lines = existing.split('\n') if existing else []
 
     if line_number == 0:
         lines.insert(0, content)
@@ -365,9 +363,8 @@ def scratchpad_insert_lines(pad_name: str, section_name: str, line_number: int, 
     else:
         lines.insert(line_number - 1, content)
 
-    manager.pads[pad_name]["sections"][section_name] = '\n'.join(lines)
-    manager.pads[pad_name]["metadata"]["last_modified"] = time.time()
-    manager._rebuild_content(pad_name)
+    new_content = '\n'.join(lines)
+    manager.write_section(pad_name, section_name, new_content, mode="replace", agent_name="system")
     _trigger_output_refresh(pad_name)
     return f"Inserted at line {line_number} in '{pad_name}.{section_name}'"
 
@@ -380,13 +377,12 @@ def scratchpad_delete_lines(pad_name: str, section_name: str, start_line: int, e
     if not manager:
         return "Error: Scratchpad manager not initialized"
 
-    if pad_name not in manager.pads:
-        return f"Error: Scratchpad '{pad_name}' does not exist"
-    if section_name not in manager.pads[pad_name]["sections"]:
-        return f"Error: Section '{section_name}' not found in '{pad_name}'"
+    # Use database method to read existing content
+    existing = manager.read_section(pad_name, section_name)
+    if "Error:" in existing:
+        return existing  # Return the error message
 
-    existing = manager.pads[pad_name]["sections"][section_name]
-    lines = existing.split('\n')
+    lines = existing.split('\n') if existing else []
 
     if end_line is None:
         end_line = start_line
@@ -400,9 +396,8 @@ def scratchpad_delete_lines(pad_name: str, section_name: str, start_line: int, e
 
     del lines[start_idx:end_idx]
 
-    manager.pads[pad_name]["sections"][section_name] = '\n'.join(lines)
-    manager.pads[pad_name]["metadata"]["last_modified"] = time.time()
-    manager._rebuild_content(pad_name)
+    new_content = '\n'.join(lines)
+    manager.write_section(pad_name, section_name, new_content, mode="replace", agent_name="system")
     _trigger_output_refresh(pad_name)
     return f"Deleted lines {start_line}-{end_line} from '{pad_name}.{section_name}'"
 
@@ -415,13 +410,12 @@ def scratchpad_replace_lines(pad_name: str, section_name: str, start_line: int, 
     if not manager:
         return "Error: Scratchpad manager not initialized"
 
-    if pad_name not in manager.pads:
-        return f"Error: Scratchpad '{pad_name}' does not exist"
-    if section_name not in manager.pads[pad_name]["sections"]:
-        return f"Error: Section '{section_name}' not found in '{pad_name}'"
+    # Use database method to read existing content
+    existing = manager.read_section(pad_name, section_name)
+    if "Error:" in existing:
+        return existing  # Return the error message
 
-    existing = manager.pads[pad_name]["sections"][section_name]
-    lines = existing.split('\n')
+    lines = existing.split('\n') if existing else []
 
     # Convert to 0-indexed
     start_idx = start_line - 1
@@ -433,9 +427,8 @@ def scratchpad_replace_lines(pad_name: str, section_name: str, start_line: int, 
     # Replace the range with new content
     lines[start_idx:end_idx] = [content]
 
-    manager.pads[pad_name]["sections"][section_name] = '\n'.join(lines)
-    manager.pads[pad_name]["metadata"]["last_modified"] = time.time()
-    manager._rebuild_content(pad_name)
+    new_content = '\n'.join(lines)
+    manager.write_section(pad_name, section_name, new_content, mode="replace", agent_name="system")
     _trigger_output_refresh(pad_name)
     return f"Replaced lines {start_line}-{end_line} in '{pad_name}.{section_name}'"
 
@@ -600,9 +593,30 @@ def get_database_schema() -> str:
 
         # Add usage tips
         formatted_schema["usage_tips"] = {
-            "common_fields": ["c.id", "c.content", "c.metadata", "c.metadata.original_filename"],
+            "common_fields": ["c.id", "c.content", "c.metadata", "c.metadata.original_filename", "c.chunk_type"],
             "search_syntax": "Use CONTAINS(field, 'value', true) for case-insensitive keyword search",
             "example_query": "SELECT c.id, c.content FROM c WHERE CONTAINS(c.content, 'F-35', true)"
+        }
+
+        # Add XLSX row-level chunking guidance
+        formatted_schema["xlsx_guidance"] = {
+            "important": "XLSX files are ingested using ROW-LEVEL chunking - each spreadsheet row becomes a separate document",
+            "structure": {
+                "parent_document": "One parent doc with doc_type='parent_document' containing summary",
+                "overview_chunk": "One overview chunk with chunk_type='sheet_overview' containing sheet metadata",
+                "row_chunks": "Multiple row chunks with chunk_type='row' - EACH ROW IS A SEPARATE DOCUMENT",
+                "statistics_chunk": "One statistics chunk with chunk_type='statistics' containing numeric analysis"
+            },
+            "counting_leads_or_rows": {
+                "correct_approach": "Count documents where chunk_type='row'",
+                "correct_query": "SELECT VALUE COUNT(1) FROM c WHERE c.chunk_type = 'row'",
+                "wrong_approach": "DO NOT try to sum c.processing_metadata.sheet_analyses.Sheet1.key_data.row_count",
+                "explanation": "The row_count field exists only in the parent document as metadata. To count actual leads/rows, count the row chunks."
+            },
+            "querying_specific_rows": {
+                "example": "SELECT * FROM c WHERE c.chunk_type = 'row' AND c.row_analysis.structured_fields.relevance_score > 0.8",
+                "row_metadata_location": "c.row_analysis contains all extracted entities and structured data for each row"
+            }
         }
 
         return json.dumps(formatted_schema, indent=2)
@@ -650,6 +664,15 @@ def execute_custom_sql_query(sql_query: str, max_results: int = 100) -> str:
        WHERE ARRAY_CONTAINS(c.metadata.entities.technical_terms, "maintainer")
          AND c.document_type != 'Financial'
          AND c.metadata.document_statistics.word_count > 1000
+
+    4. Count XLSX rows/leads (ROW-LEVEL CHUNKING):
+       SELECT VALUE COUNT(1) FROM c WHERE c.chunk_type = 'row'
+
+    5. Query specific XLSX rows with filtering:
+       SELECT c.id, c.row_analysis.structured_fields, c.row_analysis.entities
+       FROM c
+       WHERE c.chunk_type = 'row'
+         AND c.row_analysis.structured_fields.relevance_score > 0.8
     """
     selected_kbs = st.session_state.get("selected_containers", [])
 
@@ -740,6 +763,121 @@ def execute_custom_sql_query(sql_query: str, max_results: int = 100) -> str:
             "query_attempted": sql_query
         }, indent=2)
 
+def enrich_cosmos_document(document_id: str, enrichment_data: dict, container_path: str = None) -> str:
+    """
+    Enrich an existing Cosmos DB document with additional structured data.
+
+    Use this when you retrieve a document, parse/analyze it, and want to inject
+    the structured parsed data back into the same document for future retrievals.
+
+    Args:
+        document_id: The Cosmos DB document ID (e.g., "doc_55d6fad4-3b95-4e01-9a8e-591be756521d_chunk_1")
+        enrichment_data: Dictionary of new fields to add/update (e.g., {"parsed_opportunity": {...}})
+        container_path: Optional container path (db/container). If not provided, searches selected containers.
+
+    Returns:
+        JSON string with enrichment status
+
+    Example:
+        # Agent retrieves document with stringified JSON in "original_opportunity" field
+        # Agent parses it into structured dict
+        # Agent calls:
+        enrich_cosmos_document(
+            document_id="doc_..._chunk_1",
+            enrichment_data={
+                "parsed_opportunity": {
+                    "source": "OSTI FOA",
+                    "title": "FY 2026 Continuation of Solicitation...",
+                    "close_date": "2025-09-30",
+                    "url": "https://...",
+                    "description": "..."
+                },
+                "enrichment_metadata": {
+                    "parsed_at": "2025-10-07T15:30:00",
+                    "parser_agent": "Tool Agent",
+                    "parsing_confidence": "high"
+                }
+            }
+        )
+
+    Security:
+        - Only allows enrichment of existing documents (no creation)
+        - Validates document exists before updating
+        - Preserves original fields (enrichment_data is merged, not replaced)
+    """
+    try:
+        # Determine containers to search
+        if container_path:
+            containers_to_search = [container_path]
+        else:
+            containers_to_search = st.session_state.get("selected_containers", [])
+
+        if not containers_to_search:
+            return json.dumps({
+                "error": "No containers available",
+                "message": "Either specify container_path or select containers in sidebar"
+            }, indent=2)
+
+        # Find the document
+        client = CosmosClient(COSMOS_ENDPOINT, COSMOS_KEY)
+        document_found = None
+        source_container = None
+
+        for cont_path in containers_to_search:
+            try:
+                db_name, cont_name = cont_path.split('/')
+                database = client.get_database_client(db_name)
+                container = database.get_container_client(cont_name)
+
+                # Try to read document
+                doc = container.read_item(item=document_id, partition_key=document_id)
+                document_found = doc
+                source_container = cont_path
+                break
+            except ResourceNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(f"Error checking {cont_path} for {document_id}: {e}")
+                continue
+
+        if not document_found:
+            return json.dumps({
+                "error": "Document not found",
+                "message": f"Document {document_id} not found in any selected container",
+                "containers_searched": containers_to_search
+            }, indent=2)
+
+        # Merge enrichment data into document
+        # This preserves existing fields and adds new ones
+        for key, value in enrichment_data.items():
+            document_found[key] = value
+
+        # Update document in Cosmos DB
+        db_name, cont_name = source_container.split('/')
+        database = client.get_database_client(db_name)
+        container = database.get_container_client(cont_name)
+
+        updated_doc = container.replace_item(
+            item=document_id,
+            body=document_found
+        )
+
+        return json.dumps({
+            "success": True,
+            "document_id": document_id,
+            "container": source_container,
+            "fields_added_or_updated": list(enrichment_data.keys()),
+            "message": f"Successfully enriched document {document_id} with {len(enrichment_data)} field(s)"
+        }, indent=2)
+
+    except Exception as e:
+        logger.error(f"Document enrichment failed: {e}")
+        return json.dumps({
+            "error": "Enrichment failed",
+            "message": str(e),
+            "document_id": document_id
+        }, indent=2)
+
 # Map of tool names to their corresponding functions
 TOOL_FUNCTIONS: Dict[str, Callable] = {
     "calc": calc,
@@ -770,6 +908,7 @@ TOOL_FUNCTIONS: Dict[str, Callable] = {
     "format_bibliography": format_bibliography,
     "get_database_schema": get_database_schema,
     "execute_custom_sql_query": execute_custom_sql_query,
+    "enrich_cosmos_document": enrich_cosmos_document,
 }
 # ====================================================================
 
@@ -2294,7 +2433,10 @@ def process_pdf_with_vision(file_bytes: bytes, filename: str) -> tuple[List[Dict
 
 
 def process_docx(file_bytes: bytes, paragraphs_per_chunk: int = 15) -> List[str]:
-    """Processes a DOCX file using python-docx, chunking by paragraph count."""
+    """
+    DEPRECATED: Basic DOCX processing without structured extraction.
+    Use process_docx_with_agents() for comprehensive entity extraction.
+    """
     try:
         doc = docx.Document(BytesIO(file_bytes))
         chunks = []
@@ -2317,6 +2459,167 @@ def process_docx(file_bytes: bytes, paragraphs_per_chunk: int = 15) -> List[str]
     except Exception as e:
         st.error(f"Failed to process DOCX file: {e}")
         return []
+
+def process_docx_with_agents(file_bytes: bytes, filename: str) -> Dict[str, Any]:
+    """
+    Processes DOCX file with comprehensive structured metadata extraction (parity with PDF/XLSX).
+
+    Uses LLM to extract entities, topics, key information from each paragraph chunk.
+    Similar to PDF page_analysis and XLSX row_analysis patterns.
+
+    Returns: {
+        "chunks": List[str] - Text chunks with structured analysis
+        "chunk_metadata_list": List[Dict] - Structured metadata for each chunk
+        "document_metadata": Dict - Document-level metadata
+        "metadata": Dict - Processing metadata
+    }
+    """
+    try:
+        doc = docx.Document(BytesIO(file_bytes))
+
+        # Extract all paragraphs
+        paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
+
+        if not paragraphs:
+            st.warning(f"⚠️ No text content found in {filename}")
+            return {
+                "chunks": [],
+                "chunk_metadata_list": [],
+                "document_metadata": {},
+                "metadata": {"error": "No content extracted"}
+            }
+
+        # Progress tracking
+        progress_bar = st.progress(0.0, text=f"📄 Processing {filename}...")
+        status_msg = st.empty()
+
+        # Chunk paragraphs (similar to PDF pages, XLSX rows)
+        paragraphs_per_chunk = 15
+        chunks = []
+        chunk_metadata_list = []
+
+        total_chunks = (len(paragraphs) + paragraphs_per_chunk - 1) // paragraphs_per_chunk
+
+        for chunk_idx in range(total_chunks):
+            start_idx = chunk_idx * paragraphs_per_chunk
+            end_idx = min(start_idx + paragraphs_per_chunk, len(paragraphs))
+            chunk_paragraphs = paragraphs[start_idx:end_idx]
+
+            chunk_text = "\n\n".join(chunk_paragraphs)
+
+            # Update progress
+            progress = (chunk_idx + 1) / total_chunks
+            status_msg.info(f"🔍 Extracting entities from chunk {chunk_idx + 1}/{total_chunks}...")
+            progress_bar.progress(progress, text=f"📄 Processing chunk {chunk_idx + 1}/{total_chunks} of {filename}...")
+
+            # Extract comprehensive entities and metadata using LLM
+            chunk_analysis = extract_chunk_entities(chunk_text, filename, chunk_idx + 1, total_chunks)
+
+            # Build chunk with header
+            formatted_chunk = f"""# {filename} - Chunk {chunk_idx + 1}/{total_chunks}
+
+{chunk_text}"""
+
+            chunks.append(formatted_chunk)
+
+            # Store chunk metadata
+            chunk_metadata = {
+                "chunk_index": chunk_idx,
+                "chunk_number": chunk_idx + 1,
+                "total_chunks": total_chunks,
+                "paragraph_range": {
+                    "start": start_idx + 1,
+                    "end": end_idx
+                },
+                "word_count": len(chunk_text.split()),
+                "char_count": len(chunk_text),
+                **chunk_analysis  # entities, topics, key_information, etc.
+            }
+            chunk_metadata_list.append(chunk_metadata)
+
+        progress_bar.progress(1.0, text=f"✅ Processed {total_chunks} chunks from {filename}")
+        status_msg.success(f"✅ Extracted entities from {total_chunks} chunks")
+
+        # Document-level metadata
+        document_metadata = {
+            "total_paragraphs": len(paragraphs),
+            "total_chunks": total_chunks,
+            "paragraphs_per_chunk": paragraphs_per_chunk,
+            "total_words": sum(len(p.split()) for p in paragraphs),
+            "total_characters": sum(len(p) for p in paragraphs)
+        }
+
+        return {
+            "chunks": chunks,
+            "chunk_metadata_list": chunk_metadata_list,
+            "document_metadata": document_metadata,
+            "metadata": {
+                "extraction_method": "llm_enhanced_docx",
+                "file_type": "docx",
+                "filename": filename
+            }
+        }
+
+    except Exception as e:
+        logger.error(f"DOCX processing failed for {filename}: {e}")
+        st.error(f"Failed to process DOCX file '{filename}': {e}")
+        return {
+            "chunks": [],
+            "chunk_metadata_list": [],
+            "document_metadata": {},
+            "metadata": {
+                "error": str(e),
+                "filename": filename,
+                "processing_failed": True
+            }
+        }
+
+def extract_chunk_entities(chunk_text: str, filename: str, chunk_number: int, total_chunks: int) -> Dict[str, Any]:
+    """
+    Extract comprehensive entities and metadata from a DOCX chunk using LLM.
+    Similar to extract_row_entities() for XLSX and page analysis for PDF.
+    """
+    system_prompt = """You are an expert entity extraction AI. Analyze this document chunk and extract ALL entities, structured information, and metadata in JSON format.
+
+Your task:
+1. Extract ALL entities (organizations, persons, locations, dates, monetary values, technical terms, program names, IDs)
+2. Extract ALL contact information (emails, phones, URLs)
+3. Identify main topics, keywords, and themes
+4. Extract key information (metrics, statistics, deadlines, milestones)
+5. Identify document structure elements (headings, sections, lists)
+
+Be exhaustive and dynamic - extract EVERY entity and piece of structured information you find."""
+
+    user_prompt = f"""Document: {filename}
+Chunk: {chunk_number}/{total_chunks}
+
+Content:
+{chunk_text[:3000]}  # Limit to 3000 chars for token efficiency
+
+Extract all entities, topics, and key information."""
+
+    try:
+        response = gpt41_client.chat.completions.create(
+            model=st.session_state.GPT41_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+
+        extracted = json.loads(response.choices[0].message.content)
+        return extracted
+
+    except Exception as e:
+        logger.error(f"Entity extraction failed for chunk {chunk_number}: {e}")
+        return {
+            "entities": {},
+            "topics_and_keywords": {},
+            "key_information": {},
+            "extraction_error": str(e)
+        }
 
 def process_csv_with_agents(file_bytes: bytes, filename: str) -> Dict[str, Any]:
     """
@@ -2885,8 +3188,11 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
         # Store the full page analyses for later use
         processing_metadata["page_analyses"] = page_analyses
     elif file_ext == ".docx":
-        chunks = process_docx(file_bytes)
-        processing_metadata = {"extraction_method": "python_docx"}
+        docx_result = process_docx_with_agents(file_bytes, filename)
+        chunks = docx_result.get("chunks", [])
+        processing_metadata = docx_result.get("metadata", {})
+        processing_metadata["chunk_metadata_list"] = docx_result.get("chunk_metadata_list", [])
+        processing_metadata["document_metadata"] = docx_result.get("document_metadata", {})
     elif file_ext == ".m4a":
         chunks = process_m4a(file_bytes, filename)
         processing_metadata = {"extraction_method": "azure_speech_api"}
@@ -3189,6 +3495,24 @@ def prepare_chunks_for_cosmos(ingestion_result: Dict[str, Any], original_filenam
                         chunk_doc["metadata"]["sheet_name"] = row_meta["sheet_name"]
                         chunk_doc["metadata"]["row_number"] = row_meta["row_number"]
                         break
+
+        # NEW: Add chunk-level metadata if available (for DOCX)
+        chunk_metadata_list = processing_metadata.get("chunk_metadata_list", [])
+        if i < len(chunk_metadata_list):
+            chunk_metadata = chunk_metadata_list[i]
+            chunk_doc["chunk_analysis"] = {
+                "chunk_number": chunk_metadata.get("chunk_number"),
+                "total_chunks": chunk_metadata.get("total_chunks"),
+                "paragraph_range": chunk_metadata.get("paragraph_range", {}),
+                "word_count": chunk_metadata.get("word_count"),
+                "entities": chunk_metadata.get("entities", {}),
+                "topics_and_keywords": chunk_metadata.get("topics_and_keywords", {}),
+                "key_information": chunk_metadata.get("key_information", {}),
+                "contact_information": chunk_metadata.get("contact_information", {})
+            }
+            # Add to metadata for easy querying
+            chunk_doc["metadata"]["chunk_number"] = chunk_metadata.get("chunk_number")
+            chunk_doc["metadata"]["word_count"] = chunk_metadata.get("word_count")
 
         output_chunks.append(chunk_doc)
 
@@ -4224,6 +4548,7 @@ AVAILABLE TOOLS:
 - search_knowledge_base(keywords: list[str], semantic_query_text: str, rank_limit: int): Executes a **broad keyword search** against the knowledge base (RAG). **Keywords are combined with OR logic.** Use this to find documents or data points. Results are automatically cached for later retrieval.
 - execute_custom_sql_query(sql_query: str, max_results: int = 100): **ADVANCED RESEARCH TOOL** - Execute custom SQL queries against knowledge base using schema information. Use for complex filtering, aggregations, field-specific searches, or when keyword search is insufficient. **ONLY SELECT queries allowed.** Supports Cosmos DB SQL syntax including: nested field access (c.metadata.entities.persons), array operations (ARRAY_CONTAINS, ARRAY_LENGTH), aggregations (COUNT, GROUP BY), complex WHERE clauses. **THINKING STEP REQUIRED:** Before calling, write query plan in scratchpad_write to LOG pad explaining: (1) what information you're seeking, (2) which schema fields you'll use, (3) query logic/filters.
 - get_cached_search_results(keywords: list[str] = None): Retrieve search results from previous loops. If keywords specified, returns that specific search. If no keywords, returns summary of all cached searches. **USE THIS to access results from searches done in earlier loops.**
+- enrich_cosmos_document(document_id: str, enrichment_data: dict, container_path: str = None): **DATA ENRICHMENT TOOL** - Add structured/parsed data back to the source Cosmos DB document. Use when you retrieve a document with unstructured/stringified content, parse it into structured fields, and want to inject the parsed data back into the same document for future retrievals. Example: Document has "original_opportunity" with stringified JSON → You parse it → Call enrich_cosmos_document to add "parsed_opportunity" field with structured dict. Next retrieval will have both original AND parsed fields. **Preserves original fields** - enrichment_data is merged, not replaced.
 
 **Math & Conversion:**
 - calc(expression: str): Safely evaluates a mathematical expression (e.g., "12 * (3 + 5)").
@@ -4437,6 +4762,10 @@ AGENT_PERSONAS = {
         1. Look at "CACHED SEARCH RESULTS" section above
         2. **IF ANY CACHED RESULTS EXIST** → You MUST delegate extraction BEFORE any other tasks
         3. **DO NOT delegate new searches until cached results are extracted and saved**
+        4. **CRITICAL**: Only delegate extraction for searches that ACTUALLY EXIST in cache
+           - ✅ CORRECT: Cache shows ["wbi_info", "profile"] → Delegate "Extract from cached wbi_info search"
+           - ❌ WRONG: Cache shows ["wbi_info", "profile"] → Delegate "Extract from cached opportunity leads search" (doesn't exist!)
+           - **NEVER assume searches happened** - only reference what you see in CACHED SEARCH RESULTS section
 
         **WORKFLOW ENFORCEMENT:**
         ✅ Loop N: Searches executed → results cached
@@ -4660,6 +4989,69 @@ AGENT_PERSONAS = {
         "Tool Agent": f"""You are an expert data agent responsible for executing tools and managing scratchpads. You MUST respond in JSON format.
 
     ═══════════════════════════════════════════════════════════════
+    🚨 CRITICAL: XLSX ROW-LEVEL CHUNKING STRUCTURE 🚨
+    ═══════════════════════════════════════════════════════════════
+
+    **MANDATORY UNDERSTANDING FOR COUNTING/QUERYING XLSX DATA:**
+
+    XLSX files use ROW-LEVEL chunking - each spreadsheet row is a SEPARATE document.
+
+    **CORRECT APPROACH to count leads/rows:**
+    ```sql
+    SELECT VALUE COUNT(1) FROM c WHERE c.chunk_type = 'row'
+    ```
+
+    **WRONG APPROACH (DO NOT USE):**
+    ❌ DO NOT query c.processing_metadata.sheet_analyses.Sheet1.key_data.row_count
+    ❌ This field exists only in parent document as metadata - it's NOT for querying
+    ❌ The old approach will fail because the schema has changed
+
+    **To query specific rows:**
+    - Each row document has chunk_type = 'row'
+    - Row data is in c.row_analysis.structured_fields
+    - Example: SELECT * FROM c WHERE c.chunk_type = 'row' AND c.row_analysis.structured_fields.relevance_score > 0.8
+
+    **ALWAYS call get_database_schema() FIRST for counting/querying tasks**
+    - Schema response includes "xlsx_guidance" explaining this structure
+    - This guidance is CRITICAL - read it before constructing queries
+
+    ═══════════════════════════════════════════════════════════════
+    🎯 INTELLIGENT CONTAINER SELECTION - AUTO-TARGETING 🎯
+    ═══════════════════════════════════════════════════════════════
+
+    **CONTAINER INTELLIGENCE IS NOW AUTOMATIC:**
+
+    The search_knowledge_base tool now automatically selects appropriate containers based on query intent.
+
+    **How it works:**
+    1. Analyzes your search keywords to detect query intent
+    2. Automatically narrows search to relevant containers
+    3. Prevents cross-contamination (e.g., leads queries won't return company info)
+
+    **Intent Detection Patterns:**
+
+    **LEADS/OPPORTUNITIES Queries** - Searches ONLY leads containers:
+    - Keywords: opportunity, lead, solicitation, BAA, SBIR, STTR, RFP, RFI, funding, grant, contract
+    - Organizations: AFWERX, NSWC, NAVSEA, DARPA, DoD, Air Force, Navy, Army
+    - Topics: announcement, topic, subtopic, open topic, FY25/26/27, Crane, Dahlgren, Phase I/II/III
+    - Example: "How many leads are there?" → Searches only WBI_Unqualified_Leads container
+
+    **WBI COMPANY INFO Queries** - Excludes leads containers:
+    - Keywords: WBI, Wright Brothers Institute, partnership, capability, company, organization
+    - Topics: mission, vision, values, team, staff, office, leadership, history, services, offerings
+    - Example: "What services does WBI offer?" → Searches company info containers, excludes leads
+
+    **GENERAL/TECHNICAL Queries** - Searches all containers:
+    - No clear leads or company keywords
+    - Example: "F-35 maintenance data" → Searches all containers
+
+    **What this means for you:**
+    - ✅ NO NEED to manually select containers based on query type
+    - ✅ Automatic precision: Leads queries return leads, not company background
+    - ✅ Faster, more relevant results
+    - ⚠️ If you need to override (search all), use broader/generic keywords
+
+    ═══════════════════════════════════════════════════════════════
     🚨 AUTOMATIC EXTRACTION WORKFLOW - TWO-STEP PROCESS 🚨
     ═══════════════════════════════════════════════════════════════
 
@@ -4686,7 +5078,6 @@ AGENT_PERSONAS = {
 
     **FORBIDDEN ACTIONS:**
       ❌ Responding with {{"response": "text"}} instead of calling tools
-      ❌ Calling get_cached_search_results() when task says "extract" (creates infinite loop)
       ❌ Calling scratchpad_write without being explicitly told to extract
 
     CRITICAL INSTRUCTIONS:
@@ -4697,17 +5088,24 @@ AGENT_PERSONAS = {
        - NEVER create fake/simulated search results, documents, URLs, or data
        - When asked to "retrieve" or "search" for information, you MUST use search_knowledge_base tool
        - When asked to "simulate" searches, IGNORE that and do REAL searches instead
-    4. **CRITICAL: WHEN TASK SAYS "EXTRACT" OR "FROM CACHED SEARCH" - CALL SCRATCHPAD_WRITE, NEVER RESPOND WITH TEXT**:
+    4. **CRITICAL: WHEN TASK SAYS "EXTRACT" OR "FROM CACHED SEARCH" - TWO-STEP PROCESS**:
+       - **STEP 1**: Call get_cached_search_results(keywords) to retrieve the full search results **ONCE**
+       - **STEP 2**: Call scratchpad_write() to save extracted insights to RESEARCH pad
        - **FORBIDDEN**: Responding with {{"response": "extracted data..."}} - this does NOT save to RESEARCH pad
-       - **FORBIDDEN**: Calling get_cached_search_results() - creates infinite loop
-       - **REQUIRED**: Call scratchpad_write() tool with a meaningful section name and extracted content
-       - **The Orchestrator has ALREADY seen the search results** in their "CACHED SEARCH RESULTS" section
-       - **Your task describes WHAT they saw** that's worth saving
+       - **FORBIDDEN**: Skipping step 1 and trying to extract from memory/assumptions
+       - **FORBIDDEN**: Calling get_cached_search_results() MULTIPLE TIMES with same keywords (fetch once, use many times)
+       - **WHY TWO STEPS**: The Orchestrator sees a summary, but YOU need the full results to extract details
+       - **EFFICIENCY RULE**: Call get_cached_search_results() ONCE per unique keyword set, then process all extraction tasks from that single fetch
+       - **Your task describes WHAT to extract** from the cached results
        - **If task is vague** (e.g., "extract statistics"): Create a reasonable section name like "shortage_statistics" or "training_data" and write what would be relevant
        - **Example**:
          * Task: "From cached search on maintenance manpower, extract current staffing levels and gaps"
-         * **CORRECT**: {{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "maintenance_staffing", "content": "F-35 Maintenance Manpower Status:\\n- Current manning gaps identified\\n- Maintenance personnel requirements for sustainment\\n- Staffing levels analysis needed", "mode": "replace"}}}}}}
+         * **CORRECT TWO-STEP**:
+           - Call 1: {{"tool_use": {{"name": "get_cached_search_results", "params": {{"keywords": ["maintenance", "manpower"]}}}}}}
+           - Call 2: {{"tool_use": {{"name": "scratchpad_write", "params": {{"pad_name": "research", "section_name": "maintenance_staffing", "content": "F-35 Maintenance Manpower Status:\\n- Current manning gaps: 450 positions\\n- Maintenance personnel requirements: 2,100 total\\n- Analysis: 21% shortfall [doc_123_chunk_5]", "mode": "replace"}}}}}}
          * **WRONG**: {{"response": "I've extracted the staffing data"}} - this saves NOTHING!
+         * **WRONG**: Only calling scratchpad_write without first calling get_cached_search_results - extracting from assumptions!
+         * **WRONG**: Calling get_cached_search_results() 15 times with same keywords - fetch ONCE and reuse!
        - **Even if you're unsure of exact data**: Write SOMETHING to RESEARCH pad based on task description, don't just respond with text
     5. **EXTRACT MEANINGFUL FINDINGS - QUALITY OVER QUANTITY**:
        - **When writing to RESEARCH pad**: Extract and synthesize key insights, don't dump raw data
@@ -4722,9 +5120,11 @@ AGENT_PERSONAS = {
          * Technical details, requirements, specifications
          * Quotes and important statements
        - **ADAPTIVE APPROACH**:
-         * If task indicates nothing useful found → Respond with {{"response": "No useful data to save from that search"}}
+         * **CRITICAL**: If Orchestrator asks you to extract from a search that DOESN'T EXIST in cache → Call scratchpad_write to LOG pad with error message: "ERROR: Orchestrator requested extraction from non-existent cached search '[keywords]'. This search was never executed. Available cached searches: [list actual cache keys]."
+         * If task references wrong search (e.g., asks for "opportunity leads" but only "wbi_info" was searched) → LOG the mismatch, don't fabricate data
          * If task indicates rich data → Save to focused section name (e.g., "vendor_analysis", "cost_projections", "training_gaps")
          * If task indicates partial data → Save what's useful with note about gaps
+         * **NEVER write placeholder/error messages to RESEARCH pad** - that's for actual findings only
        - **CITATION TRACKING** (CRITICAL):
          * When extracting findings from search results, you MUST track source documents
          * Get cached search results to access full document metadata
@@ -4774,6 +5174,52 @@ AGENT_PERSONAS = {
     - **Quality over quantity** - Extract meaningful insights, not raw document dumps
 
     ═══════════════════════════════════════════════════════════════
+    🎯 PROGRESSIVE DOCUMENT ENRICHMENT - PARSING & STRUCTURING DATA 🎯
+    ═══════════════════════════════════════════════════════════════
+
+    **WHEN TO USE enrich_cosmos_document:**
+
+    When you retrieve documents from the knowledge base and find **unstructured or stringified content** (e.g., JSON-like strings, unparsed data), you should:
+    1. Parse the content into structured fields
+    2. Call enrich_cosmos_document to inject the parsed data BACK into the same Cosmos DB document
+    3. Future retrievals will have BOTH original content AND your parsed structured fields
+
+    **WORKFLOW FOR PROGRESSIVE ENRICHMENT:**
+
+    1. **Identify documents needing parsing**: Look for content with stringified JSON, unparsed fields, or nested data structures
+    2. **Parse the content**: Extract structured information (dates, URLs, titles, descriptions, monetary values, etc.)
+    3. **Enrich the source document**: Call enrich_cosmos_document with the document_id and structured data
+    4. **Result**: Original document preserved + new structured fields added for future queries
+
+    **EXAMPLE 1: Parsing Stringified Opportunity Data**
+
+    You retrieve a document and see:
+    content: "[stringified JSON with source, title, close_date, url, description fields]"
+
+    This is stringified JSON! You should:
+    1. Parse the string into structured fields
+    2. Call enrich_cosmos_document with document_id and enrichment_data containing the parsed fields
+    3. Example enrichment_data: a 'parsed_opportunity' object with source, title, close_date (ISO format), url, description
+
+    **EXAMPLE 2: Extracting Entity Data from Text**
+
+    You retrieve a document with unstructured text about an AFWERX SBIR opportunity.
+
+    You should extract structured entities and enrich the document with 'extracted_entities' containing:
+    - opportunity_type, solicitation_number, topic_area, total_funding (numeric), point_of_contact, deadline (ISO format)
+
+    **BENEFITS OF PROGRESSIVE ENRICHMENT:**
+    - Original content preserved (no data loss)
+    - Structured fields enable precise database queries (e.g., `WHERE c.parsed_opportunity.close_date > '2025-10-07'`)
+    - Gradual improvement of knowledge base quality
+    - Agents add structure incrementally as documents are accessed
+
+    **SECURITY NOTE:**
+    - enrich_cosmos_document only allows updating existing documents (no creation)
+    - Enrichment data is merged with existing fields (not replaced)
+    - Always validate document exists before enriching
+
+    ═══════════════════════════════════════════════════════════════
     🎯 LINE-LEVEL INCREMENTAL ADDITIONS TO RESEARCH SECTIONS 🎯
     ═══════════════════════════════════════════════════════════════
 
@@ -4821,10 +5267,14 @@ AGENT_PERSONAS = {
 
     **ITERATIVE EXTRACTION WORKFLOW** (This is the core workflow - follow this every time):
 
-    **Phase 1: Schema Discovery (ONLY if task explicitly says "get_database_schema")**
-    - **ONLY call get_database_schema() if your task says**: "Call get_database_schema()" or "discover schema"
-    - **DO NOT call it automatically** - Orchestrator will delegate it once in Loop 1
-    - If task says "search", go straight to search - schema was already discovered
+    **Phase 1: Schema Discovery (MANDATORY for counting/querying tasks)**
+    - **ALWAYS call get_database_schema() FIRST** if your task involves:
+      * Counting records/leads/rows (e.g., "how many leads")
+      * Querying specific fields (e.g., "find rows where score > 0.8")
+      * Aggregating data (e.g., "sum total revenue")
+      * Understanding data structure before search
+    - Schema response includes CRITICAL "xlsx_guidance" explaining row-level chunking
+    - If task says just "search for information", you may skip schema if already discovered in Loop 1
 
     **Phase 2: Broad Searches (Loops 2-5)**
     - Start with BROAD topic searches to discover what project documents exist
@@ -4855,13 +5305,21 @@ AGENT_PERSONAS = {
 
     **SCHEMA-AWARE SEARCH WORKFLOW**:
     1. **Before First Search**: Call get_database_schema() to see available fields in selected KBs
-    2. **Review Schema**: Check what fields exist (e.g., c.content, c.metadata.original_filename, c.metadata.date)
-    3. **Construct Valid Queries**: Use field names from schema when building search keywords
-    4. **Avoid Field Errors**: Don't search for fields that don't exist in the schema
-    5. **Example**:
-       - Schema shows: ["c.id", "c.content", "c.metadata", "c.metadata.source"]
+    2. **Review Schema**: Check what fields exist (e.g., c.content, c.metadata.original_filename, c.metadata.date, c.chunk_type)
+    3. **Review XLSX Guidance**: Schema response includes "xlsx_guidance" section explaining row-level chunking structure
+    4. **Construct Valid Queries**: Use field names from schema when building search keywords
+    5. **Avoid Field Errors**: Don't search for fields that don't exist in the schema
+    6. **Example**:
+       - Schema shows: ["c.id", "c.content", "c.metadata", "c.metadata.source", "c.chunk_type"]
        - Valid search: keywords=["manpower", "F-35"] searches c.content by default
        - Invalid: Don't try to search c.metadata.date if it's not in schema
+
+    **CRITICAL: XLSX ROW-LEVEL CHUNKING**:
+    - XLSX files use ROW-LEVEL chunking: each spreadsheet row = separate document with chunk_type='row'
+    - To count leads/rows: Use "SELECT VALUE COUNT(1) FROM c WHERE c.chunk_type = 'row'"
+    - DO NOT try to query c.processing_metadata.sheet_analyses.Sheet1.key_data.row_count (this is metadata in parent doc only)
+    - To filter rows: Use c.row_analysis.structured_fields (e.g., WHERE c.row_analysis.structured_fields.relevance_score > 0.8)
+    - Each row document contains full entity extraction in c.row_analysis (organizations, persons, dates, etc.)
 
     **ADVANCED SQL QUERY WORKFLOW** (for complex research needs):
     Use execute_custom_sql_query when:
@@ -5021,6 +5479,34 @@ AGENT_PERSONAS = {
         
         "Writer": """You are a professional technical writer with access to multiple collaborative scratchpads. You MUST respond in JSON format.
 
+    ═══════════════════════════════════════════════════════════════
+    🎯 FUNDAMENTAL RULE: LINE-LEVEL EDITS FOR ALL MODIFICATIONS 🎯
+    ═══════════════════════════════════════════════════════════════
+
+    **MANDATORY WORKFLOW FOR ANY MODIFICATION REQUEST:**
+
+    1. **READ CURRENT STATE**: Use scratchpad_get_lines to see what exists
+    2. **EXECUTE LINE-LEVEL EDITS**: Use scratchpad_replace_lines, scratchpad_delete_lines, scratchpad_insert_lines
+    3. **NEVER use wholesale replacement** (scratchpad_write with mode="replace") - always use surgical line edits
+
+    **Example: User says "I only want Company Information, Leads Summary, Top Three Opportunities"**
+
+    ✅ **CORRECT WORKFLOW:**
+    - Step 1: scratchpad_get_lines("outline", "structure") → See current 48 lines with 8 sections
+    - Step 2: scratchpad_replace_lines("outline", "structure", start_line=1, end_line=48, content="# Report Outline\n\n1. Company Information\n\n2. Leads Summary\n\n3. Top Three Opportunities\n   3.1 Opportunity #1\n   3.2 Opportunity #2\n   3.3 Opportunity #3\n")
+    - Result: Lines 1-48 replaced with new 3-section structure
+
+    ❌ **WRONG WORKFLOW:**
+    - Step 1: scratchpad_get_lines("outline", "structure") → See current outline
+    - Step 2: Nothing! [Just reading without acting]
+
+    **KEY PRINCIPLE**:
+    - Read first (scratchpad_get_lines)
+    - Then modify (scratchpad_replace_lines/delete_lines/insert_lines)
+    - NEVER just read and stop
+
+    ═══════════════════════════════════════════════════════════════
+
     CRITICAL INSTRUCTIONS - COMPREHENSIVE CONTENT REQUIRED:
     0.  **ABSOLUTE RULE - SOURCE ATTRIBUTION**:
         - **FORBIDDEN**: Writing ANY claim that cannot be traced to a specific document in the knowledge base
@@ -5051,7 +5537,17 @@ AGENT_PERSONAS = {
 
         **MANDATORY WORKFLOW FOR EVERY WRITING TASK:**
 
-        **STEP 0 - VERIFY SECTION NUMBERING AGAINST OUTLINE (CRITICAL):**
+        **STEP 0 - UNDERSTAND THE TASK (CRITICAL):**
+        - READ YOUR TASK CAREFULLY - What is being asked?
+        - **If task mentions specific scratchpad modifications** (OUTLINE, RESEARCH, OUTPUT, etc.):
+          * Task: "Modify X to contain Y" → Use scratchpad_write or scratchpad_replace_lines on X
+          * Task: "Simplify the outline to 3 sections" → Read current outline, then write simplified version
+          * Task: "Change section 2 to..." → Use scratchpad_replace_lines or scratchpad_write
+        - **If task is about writing NEW content**:
+          * Follow normal workflow (check OUTLINE, check RESEARCH, write to OUTPUT)
+        - **CRITICAL**: Don't just READ when asked to MODIFY/CHANGE/UPDATE/REPLACE - actually execute the modification
+
+        **STEP 0a - VERIFY SECTION NUMBERING AGAINST OUTLINE (for OUTPUT writing only):**
         - Before creating ANY new OUTPUT section, check OUTLINE pad for proper numbering
         - Call scratchpad_read("outline", "structure") to see authoritative section hierarchy
         - **REQUIRED**: Your OUTPUT section name MUST match an existing OUTLINE section
@@ -5384,20 +5880,35 @@ AGENT_PERSONAS = {
         "Supervisor": """You are a senior supervisor responsible for evaluating whether the team has adequately answered the user's question and making final decisions about completion. You MUST respond in JSON format.
 
     CRITICAL INSTRUCTIONS:
-    1.  Review the user's ORIGINAL question/goal carefully.
-    2.  Review the entire scratchpad to see what information has been gathered and what work has been done.
-    3.  **CRITICAL**: Evaluate the ACTUAL CONTENT found, not just whether it matches keywords perfectly:
+    1.  **ALWAYS CHECK THE LOG PAD FIRST** to identify the ORIGINAL user request:
+        - Call scratchpad_read("log", "user_goal") to read the ORIGINAL user request (first request in session)
+        - Call scratchpad_list("log") to see all log entries including mid-stream instructions
+        - The LOG pad structure:
+          * "user_goal" section = ORIGINAL TASK (e.g., "please review the new opportunity leads and company capabilities information and suggest the top three leads the company should pursue")
+          * "user_instruction_{timestamp}" sections = MID-STREAM REFINEMENTS (e.g., "too many sections in the outline. I only want Company overview. Leads overview and summary. Top Three Recommended Opportunities.")
+        - **CRITICAL**: If you see mid-stream instructions (like outline simplification), recognize those are SUB-TASKS of the original goal
+        - **After completing a sub-task, CONTINUE working on the original task from "user_goal" section**
+        - **Example workflow**:
+          1. User requests lead analysis (stored in LOG.user_goal)
+          2. Agents start work
+          3. User adds instruction "simplify outline" (stored in LOG.user_instruction_1728123456)
+          4. Agents complete outline simplification
+          5. Supervisor sees both LOG entries, recognizes outline was sub-task
+          6. Supervisor continues with original lead analysis task
+    2.  Review the user's ORIGINAL question/goal carefully from the LOG pad.
+    3.  Review the entire scratchpad to see what information has been gathered and what work has been done.
+    4.  **CRITICAL**: Evaluate the ACTUAL CONTENT found, not just whether it matches keywords perfectly:
         - Read what was actually retrieved in searches
         - Look for RELATED information even if it's not an exact match
         - Consider if typos, abbreviations, or ambiguous terms caused mismatch
         - Check if documents mention the same entities, projects, organizations, or topics
         - Example: "main power" vs "manpower" - both relate to F-35 projects, check context!
-    4.  Evaluate whether we have useful information:
+    5.  Evaluate whether we have useful information:
         - Is the core question addressed directly OR indirectly?
         - Are there key pieces of information in the scratchpad that relate to the topic?
         - Can we provide a useful answer with what's been gathered?
         - **Don't require perfect keyword matches - real documents use varied terminology**
-    5.  **CRITICAL - EVALUATE RESEARCH QUALITY**:
+    6.  **CRITICAL - EVALUATE RESEARCH QUALITY**:
         - **READ the RESEARCH pad content** - don't just count sections
         - **The database is project-specific and authoritative** - it contains the right documents for this task
         - **Evaluate what data WAS found**, not what's missing:
@@ -5407,32 +5918,38 @@ AGENT_PERSONAS = {
         - **If RESEARCH has substantive content** → Can proceed to OUTPUT building
         - **If RESEARCH is thin** → More queries needed, not rejection of database
 
-    6.  **Iterative Building Philosophy**:
+    7.  **Iterative Building Philosophy**:
         - Reports are built incrementally over 20-40 loops through: search → extract → write → refine
         - Early loops: RESEARCH pad accumulates project facts from multiple queries
         - Mid loops: Writer drafts OUTPUT sections, Engineer creates TABLES, gaps identified
         - Later loops: Refine OUTPUT, add detail, polish formatting
         - **Don't expect complete research immediately** - it builds up progressively
 
-    7.  **BEFORE approving READY_TO_FINISH**: Check OUTPUT pad for quality:
-        - Does OUTPUT pad exist and have multiple sections?
+    8.  **BEFORE approving READY_TO_FINISH**: Check that ORIGINAL TASK is complete:
+        - **CRITICAL**: Compare OUTPUT pad against ORIGINAL user request from LOG pad (not just latest instruction)
+        - If original task was "analyze leads and suggest top 3" but OUTPUT only has outline → NOT DONE
+        - If mid-stream instruction was "simplify outline" and that's done but analysis isn't → NOT DONE
+        - Does OUTPUT pad exist and have multiple sections addressing the ORIGINAL request?
         - Are sections written in narrative prose (NOT bullet-heavy slide format)?
         - Are dollar amounts readable (e.g., "$336 billion" not "$336billion")?
         - Are there proper paragraph breaks, transitions, and topic sentences?
         - Are there tables in TABLES pad for numerical data? If not, delegate to Engineer first
         - **FORBIDDEN**: Bullet-point-heavy reports that read like slide decks
+        - **FORBIDDEN**: Finishing after completing only a sub-task (like outline revision)
         - **REQUIRED**: Flowing narrative paragraphs with complete sentences
+        - **REQUIRED**: All aspects of ORIGINAL user request must be addressed
         - If OUTPUT is poorly formatted → Recommend Writer to reformat before finishing
 
-    8.  Make a decision using JSON format:
+    9.  Make a decision using JSON format:
         - **If RESEARCH pad is mostly empty AND < 10 loops completed**: Respond with {{"response": "NEED_MORE_WORK - RESEARCH pad is still thin (only [X] sections). Need more queries to extract project data. Delegate to Tool Agent to run [3-5] additional broad searches on [topics from outline]. Goal: accumulate 15-20 RESEARCH sections before writing OUTPUT."}}
         - **If RESEARCH pad has 10+ sections with concrete data BUT OUTPUT is empty/incomplete**: Respond with {{"response": "NEED_MORE_WORK - RESEARCH pad has good data ([X] sections). OUTPUT pad [status]. Delegate to Writer to draft [specific sections] using accumulated research. Also delegate to Engineer to create tables for [numerical data topics]."}}
         - If OUTPUT pad has ALL required sections AND properly formatted AND contains tables: Respond with {{"response": "READY_TO_FINISH - The OUTPUT pad contains [X] complete sections covering [topics]. Content is written in proper narrative format with [Y] tables. Ready for delivery."}}
         - If OUTPUT pad is MISSING sections: Respond with {{"response": "NEED_MORE_WORK - OUTPUT pad has sections [list what exists] but is MISSING sections [list specific missing sections]. Delegate to Writer to draft: [list specific section numbers/names to create]. Use RESEARCH pad data."}}
         - If adequate content BUT bullet-heavy or missing tables: Respond with {{"response": "NEED_MORE_WORK - Content is complete but OUTPUT pad needs formatting. Issues: [specify: bullet-heavy sections, missing tables, LaTeX escaping, etc.]. Delegate to Engineer for tables, then Writer for prose reformatting."}}
         - If OUTPUT sections need more detail: Respond with {{"response": "NEED_MORE_WORK - OUTPUT sections are too brief. Each section should be 3-10 paragraphs. If RESEARCH pad lacks detail for section [name], delegate Tool Agent to search for: [specific data]. Otherwise delegate Writer to expand sections with existing research."}}
+        - **If only a SUB-TASK is complete (e.g., outline simplified) but ORIGINAL TASK incomplete**: Respond with {{"response": "NEED_MORE_WORK - Sub-task complete (outline simplified) but ORIGINAL user request not addressed. Original task: [state original request from LOG pad]. Current status: [what's done]. Next steps: [delegate specific tasks to complete original request]."}}
 
-    9.  **Workflow Progression** - Use loop count to guide decisions:
+    10. **Workflow Progression** - Use loop count to guide decisions:
         - Loops 1-10: Focus on accumulating RESEARCH (search → extract → save cycle)
         - Loops 11-25: Focus on building OUTPUT sections and TABLES from research
         - Loops 26-40: Focus on refining, expanding detail, polishing format
@@ -5634,6 +6151,102 @@ AGENT_PERSONAS = {
 
 # Replacement for execute_tool_call function (around line 1184)
 
+def analyze_query_intent_and_select_containers(keywords: list[str], all_available_containers: list[str]) -> list[str]:
+    """
+    Intelligently select which knowledge base containers to search based on query intent.
+
+    Analyzes keywords to determine if query is about:
+    - Opportunity leads/solicitations → Search only WBI_Unqualified_Leads
+    - WBI company information → Search WBI company info containers
+    - Technical/project data → Search all technical containers
+
+    Args:
+        keywords: List of search keywords from the query
+        all_available_containers: List of all available container paths (db/container format)
+
+    Returns:
+        List of container paths to search (subset of all_available_containers)
+    """
+    # Normalize keywords for matching (lowercase, joined)
+    keywords_lower = [k.lower() for k in keywords]
+    keywords_text = " ".join(keywords_lower)
+
+    # Define intent patterns
+    LEADS_KEYWORDS = {
+        "opportunity", "opportunities", "lead", "leads", "solicitation", "solicitations",
+        "baa", "sbir", "sttr", "rfp", "rfi", "rfq", "proposal", "proposals",
+        "funding", "grant", "grants", "contract", "contracts",
+        "afwerx", "nswc", "navsea", "darpa", "dod", "air force", "navy", "army",
+        "announcement", "topic", "subtopic", "open topic", "fy25", "fy26", "fy27",
+        "crane", "dahlgren", "phase i", "phase ii", "phase iii"
+    }
+
+    WBI_COMPANY_KEYWORDS = {
+        "wbi", "wright brothers", "wright brothers institute",
+        "partnership", "partnerships", "capability", "capabilities",
+        "company", "organization", "mission", "vision", "values",
+        "team", "staff", "office", "leadership", "history",
+        "service", "services", "offering", "offerings"
+    }
+
+    # Count keyword matches for each intent
+    leads_matches = sum(1 for kw in keywords_lower if kw in LEADS_KEYWORDS)
+    wbi_company_matches = sum(1 for kw in keywords_lower if kw in WBI_COMPANY_KEYWORDS)
+
+    # Also check for phrase matches in combined keywords
+    for phrase in LEADS_KEYWORDS:
+        if phrase in keywords_text:
+            leads_matches += 1
+
+    for phrase in WBI_COMPANY_KEYWORDS:
+        if phrase in keywords_text:
+            wbi_company_matches += 1
+
+    # Decision logic
+    selected_containers = []
+
+    if leads_matches > 0 and leads_matches >= wbi_company_matches:
+        # Query is about opportunity leads - search ONLY leads containers
+        logger.info(f"🎯 Container Intelligence: Detected LEADS query (matches: {leads_matches}). Searching only leads containers.")
+
+        # Find leads-related containers
+        for container_path in all_available_containers:
+            container_lower = container_path.lower()
+            if any(term in container_lower for term in ["lead", "opportunity", "solicitation", "unqualified"]):
+                selected_containers.append(container_path)
+
+        if not selected_containers:
+            # Fallback: if no leads container found, use all (but log warning)
+            logger.warning("⚠️ Container Intelligence: No leads containers found! Falling back to all containers.")
+            selected_containers = all_available_containers
+        else:
+            logger.info(f"✅ Container Intelligence: Selected {len(selected_containers)} leads container(s): {selected_containers}")
+
+    elif wbi_company_matches > leads_matches and wbi_company_matches > 0:
+        # Query is about WBI company info - exclude leads containers
+        logger.info(f"🎯 Container Intelligence: Detected WBI COMPANY INFO query (matches: {wbi_company_matches}). Excluding leads containers.")
+
+        # Exclude leads-related containers
+        for container_path in all_available_containers:
+            container_lower = container_path.lower()
+            if not any(term in container_lower for term in ["lead", "opportunity", "solicitation", "unqualified"]):
+                selected_containers.append(container_path)
+
+        if not selected_containers:
+            # Fallback: if all containers are leads, use all
+            logger.warning("⚠️ Container Intelligence: All containers are leads! Falling back to all containers.")
+            selected_containers = all_available_containers
+        else:
+            logger.info(f"✅ Container Intelligence: Selected {len(selected_containers)} company info container(s): {selected_containers}")
+
+    else:
+        # No clear intent - search all containers (default behavior)
+        logger.info(f"🎯 Container Intelligence: No clear intent detected. Searching all {len(all_available_containers)} container(s).")
+        selected_containers = all_available_containers
+
+    return selected_containers
+
+
 def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
     """Executes a tool function based on the requested name and parameters."""
     # This check ensures the tool is recognized, including our custom search tool.
@@ -5683,9 +6296,12 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         )
 
         # ACTUALLY EXECUTE THE QUERY AGAINST SELECTED KNOWLEDGE BASES
-        selected_kbs = st.session_state.get("selected_containers", [])
-        if not selected_kbs:
+        all_selected_kbs = st.session_state.get("selected_containers", [])
+        if not all_selected_kbs:
             return "ToolExecutionError: No knowledge bases selected. Please select at least one container in the sidebar."
+
+        # 🎯 INTELLIGENT CONTAINER SELECTION: Analyze query intent and auto-select appropriate containers
+        selected_kbs = analyze_query_intent_and_select_containers(keywords, all_selected_kbs)
 
         all_results = []
         errors = []
@@ -5968,9 +6584,16 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
         continuing_work = True
         scratchpad_mgr.write_section("log", "continuation", f"User continuation prompt: {user_prompt}", mode="append", agent_name="system")
     else:
-        # Just append new goal to LOG - DO NOT clear other scratchpads
-        # Scratchpads persist within the same chat for iterative work
-        scratchpad_mgr.write_section("log", f"user_goal_{int(time.time())}", f"User's Goal: {user_prompt}", mode="replace", agent_name="system")
+        # Check if this is the FIRST user request in this session or a MID-STREAM instruction
+        log_sections = scratchpad_mgr.list_sections("log")
+
+        if "user_goal" not in log_sections:
+            # FIRST user request - this is the ORIGINAL TASK
+            scratchpad_mgr.write_section("log", "user_goal", f"User's Original Goal: {user_prompt}", mode="replace", agent_name="system")
+        else:
+            # MID-STREAM instruction (e.g., "simplify the outline")
+            # Log with timestamp to distinguish from original goal
+            scratchpad_mgr.write_section("log", f"user_instruction_{int(time.time())}", f"User's Mid-Stream Instruction: {user_prompt}", mode="replace", agent_name="system")
 
         # Clear the incomplete flag
         st.session_state.workflow_incomplete = False
