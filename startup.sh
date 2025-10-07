@@ -4,7 +4,7 @@
 # Azure sets PORT environment variable - use it or default to 8000
 PORT=${PORT:-8000}
 
-# Activate virtual environment if it exists
+# Activate virtual environment (built by Azure Oryx)
 if [ -d "/home/site/wwwroot/antenv" ]; then
     source /home/site/wwwroot/antenv/bin/activate
 fi
