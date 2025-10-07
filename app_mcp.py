@@ -8665,13 +8665,17 @@ You can:
                 # === START: NEW, MORE ROBUST ROUTER PROMPT ===
                 router_prompt = (
                     "You are an expert intent routing agent. Your task is to analyze the user's message and classify its intent. Follow these steps carefully:"
-                    "\n\n1. **Analyze the User's Message**: First, determine if the message is simple small talk (like 'hello', 'thank you') or if it contains specific topics or keywords (like 'F-35', 'project', 'budget', 'manpower model', 'leads', 'opportunities')."
+                    "\n\n1. **Analyze the User's Message**: Determine if the user is asking you to search stored documents OR if they're asking a direct question you can answer."
                     "\n\n2. **Determine the User's Goal**: "
-                    "\n   - If the message contains specific topics, the user is seeking information and wants you to search for it. The intent is `knowledge_base_query`."
-                    "\n   - If the user asks to list, count, show, or retrieve items (e.g., 'list the leads', 'how many opportunities', 'show me all projects'), the intent is `knowledge_base_query`."
-                    "\n   - If the user is clearly stating a new fact to be saved (e.g., 'Just so you know, the project deadline is now October 5th'), the intent is `fact_correction`."
-                    "\n   - **Only if the message is simple small talk with no specific topic** should the intent be `general_conversation`."
-                    "\n\n3. **CRITICAL RULE**: Do not get confused by the phrasing. A user asking 'Tell me about project X', 'What is X?', 'Knowledge base query for X', 'list the leads', or 'how many X are there' are all direct commands for you to **perform a search**. Their intent is `knowledge_base_query`."
+                    "\n   - **knowledge_base_query**: User wants you to search uploaded documents/files (e.g., 'list the leads', 'show opportunities from the spreadsheet', 'what's in the uploaded PDF')"
+                    "\n   - **fact_correction**: User is stating a new fact to save (e.g., 'Just so you know, the deadline is October 5th')"
+                    "\n   - **general_conversation**: User is asking a direct question, wants advice, help with a task, or general conversation (e.g., 'fix my configuration', 'help me with Azure settings', 'explain this concept', 'hello')"
+                    "\n\n3. **CRITICAL RULES**:"
+                    "\n   - If user asks about UPLOADED DOCUMENTS/FILES → knowledge_base_query"
+                    "\n   - If user asks YOU to help/fix/explain something directly → general_conversation"
+                    "\n   - If user wants YOU to do a task (not search files) → general_conversation"
+                    "\n   - Configuration, code fixes, advice, explanations → general_conversation"
+                    "\n   - Only search files when user explicitly wants information FROM uploaded documents"
                     "\n\n**User's Message**: \"{prompt_text}\""
                     "\n\nBased on your analysis, provide the final classification in a JSON object with format {\"intent\": \"knowledge_base_query\" | \"fact_correction\" | \"general_conversation\"}. You must respond with ONLY the JSON."
                 )
