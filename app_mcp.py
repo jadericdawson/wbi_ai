@@ -3636,7 +3636,8 @@ def _sniff_audio_format(raw: bytes, ext_hint: str) -> str:
 
 def azure_fast_transcribe_wav_bytes(wav_bytes: bytes, filename: str = "audio.wav") -> str:
     """
-    Uses Azure Speech fast transcription (synchronous) to turn a WAV (16kHz, mono, PCM16) into text.
+    Uses Azure Speech fast transcription (synchronous) to turn audio bytes into text.
+    Supports WAV, WebM, OGG, MP3, and other formats that Azure Speech can handle.
     Returns the recognized text ("" if nothing recognized).
     """
     speech_key = st.session_state.SPEECH_KEY
@@ -3649,8 +3650,19 @@ def azure_fast_transcribe_wav_bytes(wav_bytes: bytes, filename: str = "audio.wav
     headers = {'Ocp-Apim-Subscription-Key': speech_key}
     definition = {"locales": ["en-US"]}
 
+    # Detect content type from filename or bytes
+    content_type = 'audio/wav'
+    if filename.endswith('.webm'):
+        content_type = 'audio/webm'
+    elif filename.endswith('.ogg'):
+        content_type = 'audio/ogg'
+    elif filename.endswith('.mp3'):
+        content_type = 'audio/mpeg'
+    elif filename.endswith('.m4a'):
+        content_type = 'audio/mp4'
+
     files = {
-        'audio': (filename, BytesIO(wav_bytes), 'audio/wav'),
+        'audio': (filename, BytesIO(wav_bytes), content_type),
         'definition': (None, json.dumps(definition), 'application/json')
     }
 
@@ -3702,41 +3714,16 @@ def ensure_16k_mono_wav(audio_bytes_or_str: bytes | str, ext_hint: str = "wav") 
     """
     Convert any supported input (wav/mp3/m4a/webm/ogg or data URL) to 16kHz mono PCM16 WAV.
     Robust sniffing prevents 'invalid RIFF header' errors from WebM/Opus microphone recordings.
+    Falls back to Azure Speech SDK if FFmpeg is not available.
     """
     raw = coerce_audio_bytes_from_any(audio_bytes_or_str)
 
     # derive format from magic bytes first (overrides wrong hints)
     fmt = _sniff_audio_format(raw, ext_hint)
 
+    # Try using pydub/ffmpeg first (works locally)
     try:
         snd = AudioSegment.from_file(BytesIO(raw), format=fmt)
-    except Exception as e:
-        # Check if FFmpeg is missing (common on Azure App Service)
-        if "ffprobe" in str(e) or "ffmpeg" in str(e):
-            st.error(
-                "⚠️ Audio transcription requires FFmpeg, which is not installed on this server. "
-                "Please type your message instead of using voice input. "
-                "To enable audio: Install FFmpeg on your deployment environment."
-            )
-            return b""
-
-        # Try a few alternates if sniffing fails
-        for alt in ("wav", "webm", "ogg", "mp3", "m4a"):
-            if alt == fmt:
-                continue
-            try:
-                snd = AudioSegment.from_file(BytesIO(raw), format=alt)
-                break
-            except Exception:
-                snd = None
-        if snd is None:
-            st.error(
-                "Audio convert error: Decoding failed. Most browsers produce WebM/Opus from the mic. "
-                f"Tried '{fmt}' and common fallbacks; underlying error: {e}"
-            )
-            return b""
-
-    try:
         buf = BytesIO()
         snd.set_frame_rate(16000).set_channels(1).set_sample_width(2).export(
             buf, format="wav", codec="pcm_s16le"
@@ -3744,8 +3731,28 @@ def ensure_16k_mono_wav(audio_bytes_or_str: bytes | str, ext_hint: str = "wav") 
         buf.seek(0)
         return buf.read()
     except Exception as e:
-        st.error(f"Audio convert error: failed to export WAV (16k/mono). {e}")
-        return b""
+        # Check if FFmpeg is missing - if so, return raw audio for Azure Speech SDK to handle
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            # Just return the raw audio - Azure Speech SDK can handle various formats
+            return raw
+
+        # Try a few alternates if sniffing fails
+        for alt in ("wav", "webm", "ogg", "mp3", "m4a"):
+            if alt == fmt:
+                continue
+            try:
+                snd = AudioSegment.from_file(BytesIO(raw), format=alt)
+                buf = BytesIO()
+                snd.set_frame_rate(16000).set_channels(1).set_sample_width(2).export(
+                    buf, format="wav", codec="pcm_s16le"
+                )
+                buf.seek(0)
+                return buf.read()
+            except Exception:
+                continue
+
+        # If all attempts fail, return raw audio
+        return raw
 
 
 
