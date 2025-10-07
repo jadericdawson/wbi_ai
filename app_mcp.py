@@ -9660,24 +9660,18 @@ if st.session_state.pending_transcription:
             st.session_state.transcription_status = None
             st.rerun()
 else:
-    # Add CSS to position mic button to the right of chat input
+    # Add CSS to keep chat input pinned - use simpler approach
     st.markdown("""
         <style>
-        /* Create a flex container for chat input area */
-        .chat-input-row {
-            display: flex;
-            align-items: flex-end;
-            gap: 10px;
-            margin-bottom: 10px;
+        /* Keep chat input container at bottom */
+        .stChatInput {
+            position: sticky !important;
+            bottom: 0 !important;
+            z-index: 1000 !important;
         }
-        /* Chat input takes most space */
-        .chat-input-row .stChatInput {
-            flex: 1;
-        }
-        /* Mic button stays on the right */
-        .mic-button-right {
-            width: 70px;
-            flex-shrink: 0;
+        /* Add padding to main content so last message isn't hidden */
+        section[data-testid="stAppViewContainer"] .main .block-container {
+            padding-bottom: 100px !important;
         }
         </style>
     """, unsafe_allow_html=True)
