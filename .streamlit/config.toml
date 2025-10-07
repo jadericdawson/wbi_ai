@@ -3,6 +3,14 @@ headless = true
 enableCORS = false
 enableXsrfProtection = false
 port = 8000
+runOnSave = false
 
 [browser]
 gatherUsageStats = false
+
+[runner]
+fastReruns = true
+
+[client]
+showErrorDetails = false
+toolbarMode = "minimal"

@@ -8044,12 +8044,22 @@ with st.sidebar:
 
         selected_model_display = st.selectbox(
             "AI Model:",
-            options=["GPT-4.1", "O3-mini"],
+            options=["GPT-4.1", "O3"],
             index=0 if st.session_state.general_assistant_model == "gpt-4.1" else 1,
             key="model_selector_top",
-            help="GPT-4.1: Fast, cost-effective | O3-mini: Advanced reasoning"
+            help="GPT-4.1: Fast, cost-effective | O3: Advanced reasoning"
         )
-        st.session_state.general_assistant_model = "gpt-4.1" if selected_model_display == "GPT-4.1" else "o3-mini"
+        st.session_state.general_assistant_model = "gpt-4.1" if selected_model_display == "GPT-4.1" else "o3"
+
+        # RAG Mode toggle
+        if 'use_rag_mode' not in st.session_state:
+            st.session_state.use_rag_mode = False
+
+        st.session_state.use_rag_mode = st.toggle(
+            "🔍 RAG Mode",
+            value=st.session_state.use_rag_mode,
+            help="Enable to query knowledge bases. Disable for general conversation."
+        )
     else:
         # For agentic personas, show static model display
         MODEL_DISPLAY = "O3"
@@ -8452,113 +8462,12 @@ for i, m in enumerate(messages):
                 else:
                     st.warning("Could not find a preceding user question to save.")
 
-# === Minimal mic near the chat input (right-aligned), auto-transcribe on stop ===
-st.markdown(
-    """
-    <style>
-      /* Right-align the mini mic row so it sits by the chat box */
-      .mini-mic-row { display:flex; justify-content:flex-end; margin: 0.25rem 0 0.35rem 0; }
-      .mini-mic-row .stButton>button { border-radius: 999px; padding: 0.35rem 0.65rem; }
-      /* Optional: make the recorder component compact */
-      div[data-testid="stVerticalBlock"] .mic-compact button { min-width: 42px; }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
 
 # Initialize transcription state if not exists
 if "pending_transcription" not in st.session_state:
     st.session_state.pending_transcription = ""
 if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
-
-# Microphone recorder placed above chat input
-mini_mic_holder = st.container()
-with mini_mic_holder:
-    col_sp, col_mic = st.columns([0.82, 0.18])
-    with col_mic:
-        try:
-            rec = mic_recorder(
-                start_prompt="🎙️ Record",
-                stop_prompt="⏹️ Stop",
-                just_once=True,
-                use_container_width=True,
-                key="mic_compact_inline",
-                format="webm",
-            )
-        except TypeError:
-            rec = mic_recorder(
-                start_prompt="🎙️ Record",
-                stop_prompt="⏹️ Stop",
-                just_once=True,
-                use_container_width=True,
-                key="mic_compact_inline"
-            )
-
-        # When recording completes, transcribe and store in session state
-        if rec and rec.get("bytes"):
-            raw_bytes = rec["bytes"]
-
-            # Show status in chat window as a message
-            with st.chat_message("assistant"):
-                st.write("🎤 **Transcribing audio...**")
-                status_placeholder = st.empty()
-
-                # We don't trust the extension—sniff and convert
-                wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
-                if not wav16k:
-                    status_placeholder.error("❌ Could not prepare audio for transcription.")
-                    st.session_state.transcription_status = "error"
-                else:
-                    status_placeholder.info("⏳ Processing audio with Azure Speech Services...")
-                    text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
-                    if text.strip():
-                        st.session_state.pending_transcription = text.strip()
-                        st.session_state.transcription_status = "success"
-                        status_placeholder.success(f"✅ **Transcribed:** {text}")
-                        st.info("📝 The transcribed text is ready below. You can edit it before sending.")
-                    else:
-                        status_placeholder.warning("⚠️ No speech recognized. Please try again.")
-                        st.session_state.transcription_status = "empty"
-
-# Chat input - note: st.chat_input doesn't support pre-filling, so we use a workaround
-# If there's a pending transcription, auto-submit it
-if st.session_state.pending_transcription:
-    # Display the transcription in an editable text area for user review
-    with st.form(key="transcription_review_form", clear_on_submit=True):
-        st.write("**Edit transcription if needed, then submit:**")
-        edited_text = st.text_area(
-            "Transcribed text:",
-            value=st.session_state.pending_transcription,
-            height=100,
-            label_visibility="collapsed"
-        )
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
-        with col2:
-            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
-
-        if submit_button and edited_text.strip():
-            messages.append({"role": "user", "content": edited_text.strip()})
-            save_user_data(st.session_state.user_id, st.session_state.user_data)
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            # Reset the processed flag so new message will be processed
-            st.session_state.message_processed = False
-            st.rerun()
-        elif cancel_button:
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            st.rerun()
-else:
-    # Normal chat input when no transcription pending
-    if prompt := st.chat_input("Ask anything..."):
-        messages.append({"role": "user", "content": prompt})
-        save_user_data(st.session_state.user_id, st.session_state.user_data)
-        # Reset the processed flag so new message will be processed
-        st.session_state.message_processed = False
-        st.rerun()
 
 # Check if we should process the last user message
 # Only process if:
@@ -8583,13 +8492,18 @@ if should_process:
     if "stop_generation" not in st.session_state:
         st.session_state.stop_generation = False
 
+    # Initialize generation status flag
+    if "is_generating" not in st.session_state:
+        st.session_state.is_generating = False
+
     with st.chat_message("assistant"):
-        # Add stop button at the top
-        stop_button_col1, stop_button_col2 = st.columns([0.85, 0.15])
-        with stop_button_col2:
-            if st.button("⏹️ Stop", key="stop_generation_button", type="secondary", use_container_width=True):
-                st.session_state.stop_generation = True
-                st.rerun()
+        # Only show stop button while actively generating
+        if st.session_state.is_generating:
+            stop_button_col1, stop_button_col2 = st.columns([0.85, 0.15])
+            with stop_button_col2:
+                if st.button("⏹️ Stop", key="stop_generation_button", type="secondary", use_container_width=True):
+                    st.session_state.stop_generation = True
+                    st.rerun()
 
         # Check if we have preserved work from previous run
         if st.session_state.get("workflow_incomplete", False) and "scratchpad_manager" in st.session_state:
@@ -8670,39 +8584,117 @@ You can:
             pd = st.session_state.user_data["personas"].get(active_persona, {})
             return pd, pd.get("type", "simple"), pd.get("prompt", "You are a helpful assistant."), pd.get("params", {}).get("temperature", 0.7)
 
+        def _update_scratchpad_sync(pad_key: str, content: str):
+            """Synchronous scratchpad update (no threading to avoid session_state issues)."""
+            from datetime import datetime
+            try:
+                if 'scratchpads' in st.session_state:
+                    st.session_state.scratchpads[pad_key]['content'] = content
+                    st.session_state.scratchpads[pad_key]['updated_at'] = datetime.now().strftime("%H:%M:%S")
+            except Exception as e:
+                logger.error(f"Scratchpad update failed for {pad_key}: {e}")
+
+        def _analyze_conversation_context() -> str:
+            """Analyzes recent conversation for key entities, topics, and patterns."""
+            messages = st.session_state.user_data.get("personas", {}).get(active_persona, {}).get("chat_history", [])
+            recent = messages[-10:] if len(messages) > 10 else messages
+
+            if len(recent) < 2:
+                return "No conversation yet."
+
+            conv_text = "\n".join([f"{m['role']}: {m['content'][:200]}" for m in recent])
+
+            prompt = (
+                "Analyze this conversation and extract:\n"
+                "1. Key topics/subjects discussed\n"
+                "2. Important entities (people, companies, projects)\n"
+                "3. User's apparent goals/interests\n"
+                "4. Suggested next actions or questions\n\n"
+                "Be concise (3-5 bullet points per section).\n\n"
+                f"Conversation:\n{conv_text}"
+            )
+
+            try:
+                resp = st.session_state.gpt41_client.chat.completions.create(
+                    model=st.session_state.GPT41_DEPLOYMENT,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=400,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                return f"Analysis unavailable: {e}"
+
+        def _summarize_query_results(results: list, query: str) -> str:
+            """Creates a concise summary of query results for scratchpad."""
+            if not results:
+                return "No results found."
+
+            summary_text = f"**Query**: {query}\n\n**Found {len(results)} results**\n\n"
+
+            # Sample up to 5 results
+            sample = results[:5]
+            for i, r in enumerate(sample, 1):
+                content = str(r.get('content', ''))[:150]
+                summary_text += f"{i}. {content}...\n\n"
+
+            if len(results) > 5:
+                summary_text += f"... and {len(results) - 5} more results"
+
+            return summary_text
+
+        def _analyze_conversation_trends() -> str:
+            """Identifies patterns and trends in user's conversation style and interests."""
+            messages = st.session_state.user_data.get("personas", {}).get(active_persona, {}).get("chat_history", [])
+
+            if len(messages) < 5:
+                return "Not enough conversation history yet."
+
+            user_messages = [m['content'] for m in messages if m['role'] == 'user'][-20:]
+            conv_text = "\n".join(user_messages)
+
+            prompt = (
+                "Analyze these user queries to identify:\n"
+                "1. Common question patterns\n"
+                "2. Recurring topics of interest\n"
+                "3. Information-seeking style (exploratory, specific, analytical)\n"
+                "4. Recommended optimizations for better responses\n\n"
+                "Be brief (2-3 points per section).\n\n"
+                f"User queries:\n{conv_text}"
+            )
+
+            try:
+                resp = st.session_state.gpt41_client.chat.completions.create(
+                    model=st.session_state.GPT41_DEPLOYMENT,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3,
+                    max_tokens=350,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                return f"Trend analysis unavailable: {e}"
+
         # (Around line 2253 in your script)
 
         def _classify_intent(prompt_text: str) -> str:
             """
             Returns: 'knowledge_base_query' | 'fact_correction' | 'general_conversation'
-            Falls back to 'general_conversation' on error.
+            Uses RAG toggle for direct control. No LLM call needed.
             """
             try:
-                # === START: NEW, MORE ROBUST ROUTER PROMPT ===
-                router_prompt = (
-                    "You are an expert intent routing agent. Your task is to analyze the user's message and classify its intent. Follow these steps carefully:"
-                    "\n\n1. **Analyze the User's Message**: Determine if the user is asking you to search stored documents OR if they're asking a direct question you can answer."
-                    "\n\n2. **Determine the User's Goal**: "
-                    "\n   - **knowledge_base_query**: User wants you to search uploaded documents/files (e.g., 'list the leads', 'show opportunities from the spreadsheet', 'what's in the uploaded PDF')"
-                    "\n   - **fact_correction**: User is stating a new fact to save (e.g., 'Just so you know, the deadline is October 5th')"
-                    "\n   - **general_conversation**: User is asking a direct question, wants advice, help with a task, or general conversation (e.g., 'fix my configuration', 'help me with Azure settings', 'explain this concept', 'hello')"
-                    "\n\n3. **CRITICAL RULES**:"
-                    "\n   - If user asks about UPLOADED DOCUMENTS/FILES → knowledge_base_query"
-                    "\n   - If user asks YOU to help/fix/explain something directly → general_conversation"
-                    "\n   - If user wants YOU to do a task (not search files) → general_conversation"
-                    "\n   - Configuration, code fixes, advice, explanations → general_conversation"
-                    "\n   - Only search files when user explicitly wants information FROM uploaded documents"
-                    "\n\n**User's Message**: \"{prompt_text}\""
-                    "\n\nBased on your analysis, provide the final classification in a JSON object with format {\"intent\": \"knowledge_base_query\" | \"fact_correction\" | \"general_conversation\"}. You must respond with ONLY the JSON."
-                )
-                # === END: NEW PROMPT ===
+                prompt_lower = prompt_text.lower()
 
-                resp = st.session_state.gpt41_client.chat.completions.create(
-                    model=st.session_state.GPT41_DEPLOYMENT,
-                    messages=[{"role": "system", "content": router_prompt}],
-                    response_format={"type": "json_object"},
-                )
-                return json.loads(resp.choices[0].message.content).get("intent", "general_conversation")
+                # Fact correction indicators (check first, most specific)
+                if any(phrase in prompt_lower for phrase in ['just so you know', 'for your information',
+                                                               'remember that', 'note that', 'fyi']):
+                    return "fact_correction"
+
+                # Use RAG mode toggle for direct control
+                if st.session_state.get("use_rag_mode", False):
+                    return "knowledge_base_query"
+                else:
+                    return "general_conversation"
+
             except Exception:
                 return "general_conversation"
             
@@ -8756,21 +8748,28 @@ You can:
                     schema_context += f"- **{cont_name}**: Common fields include {', '.join(fields[:10])}\n"
 
                 initial_system_prompt = (
-                    'You are an expert Cosmos DB SQL query generator with deep knowledge of the available schema. '
-                    'You create intelligent, targeted queries based on user questions.\n\n'
+                    'You are an expert Azure Cosmos DB for NoSQL query generator with deep knowledge of the query syntax and schema.\n\n'
                     f'{schema_context}\n\n'
-                    '# Query Generation Rules:\n'
-                    '1. **Extract meaningful keywords**: Focus on proper nouns, technical terms, project names, technologies, acronyms, numbers\n'
-                    '2. **Ignore stop words**: the, a, an, me, about, tell, what, where, how, can, you, please, etc.\n'
-                    '3. **Use actual available fields**: Refer to the schema above for available fields in each container\n'
-                    '4. **Use CONTAINS for text search**: CONTAINS(field, "keyword", true) for case-insensitive matching\n'
-                    '5. **Combine keywords intelligently**: \n'
-                    '   - Use OR for broader recall (finding ANY of the keywords)\n'
-                    '   - Use AND for precision (finding ALL keywords)\n'
-                    '   - Use NOT for exclusions\n'
-                    '6. **Support complex queries**: Leverage nested fields like c.metadata.original_filename, c.metadata.doc_type\n'
-                    '7. **Default limit**: TOP 50 unless user specifies otherwise\n'
-                    '8. **Be selective**: Search the most relevant fields based on query intent\n\n'
+                    '# Cosmos DB Query Syntax Rules:\n'
+                    '1. **Basic syntax**: SELECT [fields] FROM [alias] WHERE [conditions]\n'
+                    '2. **Always use an alias**: FROM c or FROM products p (required)\n'
+                    '3. **Array access**: Use JOIN to iterate arrays: JOIN t IN c.tags\n'
+                    '4. **Text search**: Use CONTAINS(c.field, "text", true) for case-insensitive search\n'
+                    '5. **DO NOT use LIKE**: Not supported - use CONTAINS instead\n'
+                    '6. **Nested properties**: Access with dot notation: c.metadata.sku\n'
+                    '7. **Equality filters**: Use = not == (c.status = "active")\n'
+                    '8. **String functions**: STARTSWITH, ENDSWITH, CONTAINS, UPPER, LOWER\n'
+                    '9. **Logical operators**: AND, OR, NOT, IN\n'
+                    '10. **Sorting**: ORDER BY c.field [ASC|DESC]\n\n'
+                    '# Query Strategy - BE VERY BROAD:\n'
+                    '1. **DEFAULT QUERY**: SELECT TOP 100 * FROM c (use this for 90% of queries)\n'
+                    '2. **Questions about relationships/importance**: Always return all data → SELECT TOP 100 * FROM c\n'
+                    '3. **"Is X important/related to Y?"**: Return ALL data from Y containers → SELECT TOP 100 * FROM c\n'
+                    '4. **Container names ARE the filter**: If containers match subject, no WHERE clause needed\n'
+                    '5. **No qualitative filtering**: Terms like "important", "best", "top" are for AI analysis, not WHERE clauses\n'
+                    '6. **Unknown entities**: If entity might not exist in data, return all → SELECT TOP 100 * FROM c\n'
+                    '7. **Use CONTAINS only for**: Exact IDs, confirmed field values in schema, specific document searches\n'
+                    '8. **Never filter on**: Adjectives, relationships, qualitative terms, unconfirmed entity names\n\n'
                     '# Advanced Capabilities:\n'
                     '- For date/time queries: Filter on c.metadata.created_at, c.verified_at, or dates in c.timeline\n'
                     '- For document type queries: Filter on c.doc_type, c.metadata.doc_type\n'
@@ -8805,11 +8804,26 @@ You can:
                     'SQL: SELECT TOP 20 c.question, c.answer, c.verified_at FROM c WHERE '
                     'CONTAINS(c.question, "cybersecurity", true) OR CONTAINS(c.answer, "cybersecurity", true) '
                     'ORDER BY c.verified_at DESC\n\n'
-                    'Query: "list the leads" or "show me all leads" or "how many leads"\n'
-                    'Keywords: ["leads"]\n'
-                    'Reasoning: User wants to list/count items. For XLSX data with row-level chunking, search for chunk_type="row" AND relevant content\n'
-                    'SQL: SELECT TOP 100 c.id, c.content, c.metadata, c.row_analysis FROM c WHERE '
-                    'c.chunk_type = "row" OR CONTAINS(c.content, "leads", true) OR CONTAINS(c.content, "opportunity", true)\n\n'
+                    'Query: "list all items" or "show me everything" or "how many records"\n'
+                    'Keywords: []\n'
+                    'Reasoning: User wants all records. No filtering needed.\n'
+                    'SQL: SELECT TOP 100 * FROM c\n\n'
+                    'Query: "tell me about [topic]" or "what is [entity]" or "analyze [subject]"\n'
+                    'Keywords: []\n'
+                    'Reasoning: Broad informational query. Container name matches the subject - return all data for comprehensive analysis.\n'
+                    'SQL: SELECT TOP 100 * FROM c\n\n'
+                    'Query: "what are the best [items]" or "show top [category]" or "strongest [aspect]"\n'
+                    'Keywords: []\n'
+                    'Reasoning: Analysis question with qualitative filter. Return all data - AI will analyze and rank post-retrieval. Do not filter on "best/top/strongest".\n'
+                    'SQL: SELECT TOP 100 * FROM c\n\n'
+                    'Query: "is X important/related to [subject]?" or "does [subject] work with Y?"\n'
+                    'Keywords: []\n'
+                    'Reasoning: Relationship/importance question. Return ALL data from subject containers - AI will analyze relationships and importance. X and Y might not exist in data as exact strings.\n'
+                    'SQL: SELECT TOP 100 * FROM c\n\n'
+                    'Query: "find records for company Acme Corp"\n'
+                    'Keywords: ["Acme Corp"]\n'
+                    'Reasoning: Specific entity lookup. Filter on the concrete company name if field exists in schema.\n'
+                    'SQL: SELECT TOP 100 * FROM c WHERE c.Company = "Acme Corp"\n\n'
                     'Respond ONLY with JSON: {"keywords": ["keyword1", "keyword2"], "reasoning": "brief explanation of query strategy", "query_string": "SELECT..."}'
                 )
                 resp = st.session_state.gpt41_client.chat.completions.create(
@@ -8909,33 +8923,45 @@ You can:
                 try:
                     db_name, cont_name = kb_path.split("/")
                 except ValueError:
+                    logger.warning(f"Invalid KB path format: {kb_path}")
                     continue
                 uploader = get_cosmos_uploader(db_name, cont_name)
                 if not uploader:
+                    logger.warning(f"Could not get uploader for {kb_path}")
                     continue
 
                 if cont_name == "VerifiedFacts":
                     fact_query = f"SELECT TOP 10 * FROM c WHERE {vf_clause} ORDER BY c.verified_at DESC"
+                    logger.info(f"Executing VerifiedFacts query on {kb_path}: {fact_query[:100]}")
                     res = uploader.execute_query(fact_query)
+                    logger.info(f"VerifiedFacts query returned {len(res)} results")
                     for r in res:
                         if isinstance(r, dict):
                             r["_source_container"] = kb_path
                     all_verified_facts.extend(res)
                 else:
+                    logger.info(f"Executing document query on {kb_path}: {broad_query[:100]}")
                     res = uploader.execute_query(broad_query)
+                    logger.info(f"Document query returned {len(res)} results from {kb_path}")
                     for r in res:
                         if isinstance(r, dict):
                             r["_source_container"] = kb_path
                     all_document_chunks.extend(res)
 
             # Rank document chunks by relevance
-            # For listing queries, return more results
-            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate"]
+            # For listing queries, return more results and skip aggressive filtering
+            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate", "tell me about", "what are"]
             is_listing_query = any(keyword in prompt_text.lower() for keyword in listing_keywords)
-            top_k = 50 if is_listing_query else 30
+            top_k = 100 if is_listing_query else 30
 
             if all_document_chunks:
-                all_document_chunks = _rank_results_by_relevance(all_document_chunks, prompt_text, top_k=top_k)
+                if is_listing_query:
+                    # For listing queries, keep all results without scoring (user wants to see everything)
+                    all_document_chunks = all_document_chunks[:top_k]
+                    logger.info(f"Listing query detected - returning all {len(all_document_chunks)} results without filtering")
+                else:
+                    # For specific queries, rank by relevance
+                    all_document_chunks = _rank_results_by_relevance(all_document_chunks, prompt_text, top_k=top_k)
 
             return all_verified_facts, all_document_chunks
 
@@ -8945,9 +8971,10 @@ You can:
                 return "No relevant facts were found in the knowledge base."
 
             # Detect if this is a listing/counting query
-            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate"]
+            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate", "tell me about"]
             is_listing_query = any(keyword in prompt_text.lower() for keyword in listing_keywords)
 
+            # Pass all results to distillation without limiting
             distillation_input = {
                 "user_confirmed_facts": verified_facts,
                 "document_sources": chunks
@@ -8956,14 +8983,16 @@ You can:
             if is_listing_query:
                 # For listing queries, preserve more data and structure
                 distillation_prompt = (
-                    "You are an expert AI data analyst. The user wants to LIST or COUNT items. "
-                    "Your job is to EXTRACT and PRESERVE the key information from each item, NOT to summarize.\n\n"
-                    "# LISTING RULES:\n"
-                    "- Extract key fields from EACH document/row (title, description, URL, dates, etc.)\n"
+                    "You are an expert AI data analyst. The user asked about information from their database. "
+                    "Your job is to EXTRACT and ORGANIZE the key information from the search results provided below.\n\n"
+                    "# CRITICAL RULES:\n"
+                    "- ONLY use information from the search results provided - DO NOT use general knowledge or external information\n"
+                    "- The search results ARE the relevant data - extract and present them clearly\n"
+                    "- Extract key fields from EACH document/row (company names, contacts, status, industry, dates, etc.)\n"
                     "- Preserve individual item details - do NOT merge or summarize multiple items into one\n"
-                    "- Format as a numbered or bulleted list with clear item separation\n"
-                    "- Include all items found (up to 50), not just a few examples\n"
-                    "- Each item should have: Title/Name, Brief Description (1-2 sentences), Key Details (dates, amounts, etc.)\n\n"
+                    "- Format as a clear, organized structure (bullet points, numbered list, or table format)\n"
+                    "- Include all items from the search results\n"
+                    "- Each item should show: Company/Name, Contact Info, Status, Industry, and any other relevant fields\n\n"
                     f"USER'S QUESTION: \"{prompt_text}\"\n\n"
                     f"SEARCH RESULTS ({len(chunks)} items found):\n{json.dumps(distillation_input, indent=2)}"
                 )
@@ -8992,35 +9021,121 @@ You can:
             )
             return (resp.choices[0].message.content or "").strip()
 
-        def _stream_synthesis(system_prompt: str, user_payload: str, placeholder) -> str:
-            """Streams synthesis using selected model and returns the full concatenated text."""
+        def _stream_synthesis(system_prompt: str, user_payload: str, placeholder, thinking_placeholder=None) -> tuple:
+            """
+            Streams synthesis using selected model.
+            Returns: (full_response, thinking_content)
+            - full_response: Complete response including <think> tags
+            - thinking_content: Just the content inside <think> tags or O3 reasoning
+            """
             # Use selected model for General Assistant
             selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
-            if selected_model == "o3-mini":
+            if selected_model == "o3":
                 client = st.session_state.o3_client
                 deployment = st.session_state.O3_DEPLOYMENT
             else:
                 client = st.session_state.gpt41_client
                 deployment = st.session_state.GPT41_DEPLOYMENT
 
-            stream = client.chat.completions.create(
-                model=deployment,
-                messages=[
+            # O3 models use max_completion_tokens instead of max_tokens
+            create_params = {
+                "model": deployment,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_payload},
                 ],
-                stream=True,
-            )
+                "stream": True,
+            }
+            # Note: max_tokens not set here to allow longer synthesis responses
+
+            stream = client.chat.completions.create(**create_params)
             parts = []
+            reasoning_parts = []
+
+            # Track whether we're inside <think> tags for GPT-4.1
+            inside_think = False
+            think_parts = []
+            answer_parts = []
+            buffer = ""
+
             for chunk in stream:
+                if st.session_state.stop_generation:
+                    st.warning("⚠️ Response generation stopped by user.")
+                    st.session_state.stop_generation = False
+                    st.session_state.is_generating = False
+                    st.stop()
+
+                # O3 models return reasoning in a separate field
+                if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
+                    if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+                        reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
+                        # Display reasoning in real-time if placeholder provided
+                        if thinking_placeholder:
+                            thinking_placeholder.markdown("".join(reasoning_parts))
+
                 if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content
                     parts.append(token)
-                    placeholder.markdown("".join(parts) + " ▌")
+
+                    # For GPT-4.1, detect and separate <think> content
+                    if selected_model != "o3":
+                        buffer += token
+
+                        # Check for <think> tag opening
+                        if "<think>" in buffer and not inside_think:
+                            before_think = buffer.split("<think>")[0]
+                            answer_parts.append(before_think)
+                            buffer = buffer.split("<think>", 1)[1]
+                            inside_think = True
+
+                        # Check for </think> tag closing
+                        if "</think>" in buffer and inside_think:
+                            think_content = buffer.split("</think>")[0]
+                            think_parts.append(think_content)
+                            buffer = buffer.split("</think>", 1)[1]
+                            inside_think = False
+
+                            # Display thinking content in real-time
+                            if thinking_placeholder:
+                                thinking_placeholder.markdown("".join(think_parts))
+
+                        # Accumulate content based on current state
+                        if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
+                            # We're in answer mode and buffer has no partial tags
+                            answer_parts.append(buffer)
+                            buffer = ""
+                            # Display answer in real-time (without <think> tags)
+                            placeholder.markdown("".join(answer_parts) + " ▌")
+                        elif inside_think and not "</think>" in buffer:
+                            # We're in think mode, accumulate thinking
+                            think_parts.append(buffer)
+                            buffer = ""
+                            # Display thinking content in real-time
+                            if thinking_placeholder:
+                                thinking_placeholder.markdown("".join(think_parts))
+                    else:
+                        # For O3, just display the answer
+                        placeholder.markdown("".join(parts) + " ▌")
+
+            # Handle any remaining buffer
+            if buffer:
+                if inside_think:
+                    think_parts.append(buffer)
+                else:
+                    answer_parts.append(buffer)
 
             full_response = "".join(parts)
-            placeholder.markdown(full_response) # Final update without the cursor
-            return full_response
+
+            # Final display updates
+            if selected_model == "o3":
+                placeholder.markdown(full_response)
+                thinking_content = "".join(reasoning_parts) if reasoning_parts else None
+            else:
+                answer_only = "".join(answer_parts)
+                placeholder.markdown(answer_only)
+                thinking_content = "".join(think_parts) if think_parts else None
+
+            return full_response, thinking_content
 
         # ----------------------------
         # Mode selection
@@ -9036,6 +9151,7 @@ You can:
         # 1) Agentic personas stay agentic
         if persona_type == "agentic":
             logger.info(f"=== AGENTIC WORKFLOW ACTIVATED === User prompt: {user_prompt[:100]}...")
+            st.session_state.is_generating = True
             try:
                 final_answer = run_agentic_workflow(
                     user_prompt,
@@ -9050,6 +9166,8 @@ You can:
                 st.session_state.rag_file_status = None
             except Exception as e:
                 st.error(f"An error occurred in the agentic workflow: {e}")
+            finally:
+                st.session_state.is_generating = False
             st.stop()
 
         # 2) Fact correction (all personas)
@@ -9090,8 +9208,14 @@ You can:
                 st.stop()
 
         # 3) KB intent → RAG (for ANY non-agentic persona, e.g., Pirate)
+        # Warn if RAG mode is on but no databases selected
+        if intent == "knowledge_base_query" and not selected_kbs:
+            st.warning("⚠️ **RAG Mode is enabled but no knowledge bases are selected!**\n\nPlease select at least one database from the sidebar under 'Select Knowledge Bases' to search your data.")
+            logger.warning("RAG mode enabled but no knowledge bases selected")
+
         if intent == "knowledge_base_query" and selected_kbs:
             logger.info(f"=== KB QUERY PATH ACTIVATED === User prompt: {user_prompt[:100]}...")
+            st.session_state.is_generating = True
             try:
                 agent_log = []
 
@@ -9105,25 +9229,136 @@ You can:
                     st.write("**Comprehensive Query for Document Stores:**")
                     st.code(broad_query, language="sql")
 
-                # Step 2: Execute against selected KBs
-                with st.spinner("Step 2: Searching selected knowledge bases..."):
-                    vf, chunks = _search_selected_kbs(broad_query, user_prompt)
-                agent_log.append(
-                    f"✅ Step 2: Searched {len(selected_kbs)} KB(s) — {len(vf)} user-confirmed fact(s), {len(chunks)} document chunk(s)."
-                )
-                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                # Update context analysis scratchpad early
+                context = _analyze_conversation_context()
+                _update_scratchpad_sync('context_analysis', context)
 
-                # Display raw search results
+                # Step 2: Iterative query execution with refinement
+                query_history = []  # Track all queries and results
+                max_iterations = 3
+                iteration = 1
+
+                while iteration <= max_iterations:
+                    with st.spinner(f"Step 2.{iteration}: Searching knowledge bases..."):
+                        logger.info(f"Selected KBs: {selected_kbs}")
+                        vf, chunks = _search_selected_kbs(broad_query, user_prompt)
+                        logger.info(f"Iteration {iteration} Results: {len(vf)} facts, {len(chunks)} chunks")
+
+                    # Log this query and results
+                    query_history.append({
+                        "iteration": iteration,
+                        "query": broad_query,
+                        "results_count": len(vf) + len(chunks),
+                        "facts": len(vf),
+                        "chunks": len(chunks)
+                    })
+
+                    agent_log.append(
+                        f"✅ Step 2.{iteration}: Query returned {len(vf)} fact(s), {len(chunks)} chunk(s)."
+                    )
+                    log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+
+                    # Display this iteration's results
+                    with query_expander:
+                        st.write(f"**Query Iteration {iteration}:**")
+                        st.code(broad_query, language="sql")
+                        st.write(f"_Results: {len(vf)} facts, {len(chunks)} chunks_")
+
+                        if chunks:
+                            st.json(chunks[:5])  # Show sample
+
+                    # Step 2b: Review results and decide if refinement needed
+                    # Special case: If first iteration returns 0 results, immediately try broad query
+                    if iteration == 1 and (len(vf) + len(chunks)) == 0:
+                        agent_log.append("⚠️ No results found. Trying broad query: SELECT TOP 100 * FROM c")
+                        log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                        broad_query = "SELECT TOP 100 * FROM c"
+                        iteration += 1
+                        continue
+
+                    if (len(vf) + len(chunks)) >= 5 and iteration < max_iterations:
+                        # Only consider refinement if we have at least 5 results
+                        # Check if results actually contain relevant information
+                        sample_content = " ".join([str(c.get('content', ''))[:200] for c in chunks[:3]])
+
+                        review_prompt = (
+                            f"You are a query optimization agent. Review these search results and determine if they sufficiently answer the user's question.\n\n"
+                            f"USER QUESTION: {user_prompt}\n\n"
+                            f"CURRENT QUERY: {broad_query}\n\n"
+                            f"RESULTS: Found {len(chunks)} documents and {len(vf)} facts.\n"
+                            f"Sample content from results: {sample_content}\n\n"
+                            f"CRITICAL RULES:\n"
+                            f"- If results contain relevant information about the query subject, mark as sufficient\n"
+                            f"- For analysis questions (\"best at\", \"what is\"), broad results are GOOD - mark sufficient\n"
+                            f"- Only refine if results are clearly off-topic or empty\n"
+                            f"- NEVER use LIKE in Cosmos DB queries - use CONTAINS or simple filters\n"
+                            f"- Prefer broad queries: SELECT TOP 100 * FROM c\n\n"
+                            f"Respond with JSON: {{\"sufficient\": true/false, \"reason\": \"brief explanation\", \"refined_query\": \"improved SQL or null\"}}"
+                        )
+
+                        try:
+                            review_resp = st.session_state.gpt41_client.chat.completions.create(
+                                model=st.session_state.GPT41_DEPLOYMENT,
+                                messages=[{"role": "user", "content": review_prompt}],
+                                response_format={"type": "json_object"},
+                                temperature=0.2,
+                                max_tokens=500,
+                            )
+                            review = json.loads(review_resp.choices[0].message.content)
+
+                            if review.get("sufficient", True):
+                                agent_log.append(f"✅ Results sufficient: {review.get('reason', 'Ready to synthesize')}")
+                                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                                break
+                            elif review.get("refined_query"):
+                                broad_query = review["refined_query"]
+                                agent_log.append(f"🔄 Refining query: {review.get('reason', 'Improving search')}")
+                                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                                iteration += 1
+                            else:
+                                break
+                        except Exception as e:
+                            logger.error(f"Query review failed: {e}")
+                            break
+                    else:
+                        break
+
+                # Store query history in scratchpad
+                query_scratchpad = "## Query History\n\n"
+                for q in query_history:
+                    query_scratchpad += f"**Iteration {q['iteration']}**\n"
+                    query_scratchpad += f"- Query: `{q['query'][:100]}...`\n"
+                    query_scratchpad += f"- Results: {q['results_count']} items ({q['facts']} facts, {q['chunks']} chunks)\n\n"
+                _update_scratchpad_sync('data_summary', query_scratchpad)
+
+                # Final results summary
                 with query_expander:
-                    st.write("**Raw Search Results:**")
+                    st.write("**Final Search Results:**")
                     if vf:
                         st.write(f"_User-Confirmed Facts ({len(vf)}):_")
-                        st.json(vf[:5])  # Show first 5
+                        st.json(vf[:5])
                     if chunks:
-                        st.write(f"_Document Chunks from Uploaded Sources ({len(chunks)}):_")
-                        st.json(chunks[:10])  # Show first 10
+                        st.write(f"_Document Chunks ({len(chunks)}):_")
+                        st.json(chunks[:10])
                     if not vf and not chunks:
-                        st.write("_No results found._")
+                        st.write("_No results found after all iterations._")
+
+                # Display AI Scratchpads OUTSIDE the expander
+                # Initialize scratchpad state if needed
+                if 'scratchpads' not in st.session_state:
+                    st.session_state.scratchpads = {
+                        'query_history': {'title': '📋 Query History', 'content': '', 'updated_at': None},
+                        'context_analysis': {'title': '📊 Context Analysis', 'content': '', 'updated_at': None},
+                        'data_summary': {'title': '💾 Data Summary', 'content': '', 'updated_at': None}
+                    }
+
+                # Display scratchpads as separate expanders below the query expander
+                for key, pad in st.session_state.scratchpads.items():
+                    if pad['content']:
+                        with st.expander(pad['title'], expanded=False):
+                            st.markdown(pad['content'])
+                            if pad['updated_at']:
+                                st.caption(f"Updated: {pad['updated_at']}")
 
                 # Step 3: Distill (synthesize all trusted sources)
                 with st.spinner("Step 3: Distilling all retrieved data from trusted sources..."):
@@ -9140,34 +9375,58 @@ You can:
                 # Step 4: Synthesize in persona voice, grounded ONLY in distilled facts
                 synthesis_system_prompt = (
                     f"{persona_prompt_text} First, think step-by-step in a `<think>` block. "
-                    "Then, synthesize a clear answer only from the provided key facts. "
-                    "**If the provided key facts are insufficient or state 'No relevant facts were found', you MUST reply explicitly that you cannot answer from the knowledge base.**"
+                    "Then, synthesize a clear answer ONLY from the provided key facts below. "
+                    "\n\n**CRITICAL RULES:**\n"
+                    "1. The key facts are from the user's private database and contain ALL relevant context\n"
+                    "2. Entities mentioned by the user refer to what exists in their database\n"
+                    "3. The database IS the full context - assume the user is asking about their specific data\n"
+                    "4. DO NOT use general knowledge or external information\n"
+                    "5. Answer directly and confidently from the provided facts\n"
+                    "6. ONLY state you cannot answer if the facts are truly empty or irrelevant\n\n"
+                    "The user is asking about their data. Provide a direct answer using their data."
                 )
-                synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts:\n{distilled}"
+                synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts from the database:\n{distilled}"
 
                 # Use selected model for synthesis
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
-                model_label = "o3-mini" if selected_model == "o3-mini" else "GPT-4.1"
+                model_label = "O3" if selected_model == "o3" else "GPT-4.1"
 
                 with st.spinner(f"Synthesizing final answer with {model_label}..."):
-                    full_response = _stream_synthesis(synthesis_system_prompt, synthesis_user_payload, final_answer_placeholder)
+                    # Create a placeholder in thinking_expander for real-time thinking display
+                    thinking_placeholder = thinking_expander.empty()
+                    full_response, thinking_content = _stream_synthesis(
+                        synthesis_system_prompt,
+                        synthesis_user_payload,
+                        final_answer_placeholder,
+                        thinking_placeholder
+                    )
 
-                thinking_content = re.search(r"<think>(.*?)</think>", full_response, re.DOTALL)
-                final_answer = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
-                final_answer_placeholder.markdown(final_answer)
+                # Display thinking content if available
                 if thinking_content:
-                    agent_log.append("✅ Final answer synthesized.")
-                    log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-                    thinking_expander.info(thinking_content.group(1).strip())
+                    thinking_placeholder.info(thinking_content)
+
+                agent_log.append("✅ Final answer synthesized.")
+                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
                 messages.append({"role": "assistant", "content": full_response})
                 save_user_data(st.session_state.user_id, st.session_state.user_data)
                 st.session_state.session_rag_context = ""
                 st.session_state.rag_file_status = None
+                st.session_state.is_generating = False
+
+                # Update scratchpads after response completes
+                summary = _summarize_query_results(vf + chunks, broad_query)
+                _update_scratchpad_sync('data_summary', summary)
+
+                # Update context analysis scratchpad
+                context = _analyze_conversation_context()
+                _update_scratchpad_sync('context_analysis', context)
+
                 st.stop()
 
             except Exception as e:
                 st.error(f"An error occurred in the retrieval process: {e}")
+                st.session_state.is_generating = False
                 # graceful fallthrough to simple quick path below
 
         # 4) Simple quick path (fallback/general conversation)
@@ -9177,6 +9436,7 @@ You can:
             substantive_words = [w for w in re.split(r"\W+", user_prompt.lower()) if len(w) > 3]
             if len(substantive_words) >= 2:
                 logger.info(f"Intent was 'general_conversation' but {len(selected_kbs)} KB(s) selected and query appears substantive. Attempting KB search as fallback.")
+                st.session_state.is_generating = True
                 try:
                     agent_log = []
                     with st.spinner("Searching knowledge bases (fallback)..."):
@@ -9200,61 +9460,280 @@ You can:
                         synthesis_system_prompt = (
                             f"{persona_prompt_text} First, think step-by-step in a `<think>` block. "
                             "Then, synthesize a clear answer only from the provided key facts. "
-                            "**If the provided key facts are insufficient, you MUST reply explicitly that you cannot answer from the knowledge base.**"
+                            "\n\n**CRITICAL RULES:**\n"
+                            "1. The key facts are from the user's private database and contain ALL relevant context\n"
+                            "2. Entities mentioned by the user refer to what exists in their database\n"
+                            "3. The database IS the full context - assume the user is asking about their specific data\n"
+                            "4. DO NOT use general knowledge or external information\n"
+                            "5. Answer directly and confidently from the provided facts\n"
+                            "6. ONLY state you cannot answer if the facts are truly empty or irrelevant\n\n"
+                            "The user is asking about their data. Provide a direct answer using their data."
                         )
                         synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts:\n{distilled}"
 
                         with st.spinner("Synthesizing final answer..."):
-                            full_response = _stream_synthesis(synthesis_system_prompt, synthesis_user_payload, final_answer_placeholder)
+                            # Create a placeholder in thinking_expander for real-time thinking display
+                            thinking_placeholder = thinking_expander.empty()
+                            full_response, thinking_content = _stream_synthesis(
+                                synthesis_system_prompt,
+                                synthesis_user_payload,
+                                final_answer_placeholder,
+                                thinking_placeholder
+                            )
 
-                        thinking_content = re.search(r"<think>(.*?)</think>", full_response, re.DOTALL)
-                        final_answer = re.sub(r"<think>.*?</think>", "", full_response, flags=re.DOTALL).strip()
-                        final_answer_placeholder.markdown(final_answer)
+                        # Display thinking content if available
                         if thinking_content:
-                            thinking_expander.info(thinking_content.group(1).strip())
+                            thinking_placeholder.info(thinking_content)
 
                         messages.append({"role": "assistant", "content": full_response})
                         save_user_data(st.session_state.user_id, st.session_state.user_data)
                         st.session_state.session_rag_context = ""
                         st.session_state.rag_file_status = None
+                        st.session_state.is_generating = False
                         st.stop()
                 except Exception as e:
                     logger.error(f"Fallback KB search failed: {e}")
+                    st.session_state.is_generating = False
                     # Continue to simple quick path below
 
         # 4b) Simple quick path (fallback/general conversation)
         logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === No KB query triggered. Intent: {intent}, KBs: {len(selected_kbs)}")
+        st.session_state.is_generating = True
         try:
-            with st.spinner("Synthesizing quick answer..."):
-                _, _, system_prompt, temp = _persona()
-                user_context = user_prompt
-                if st.session_state.session_rag_context:
-                    user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
+            _, _, system_prompt, temp = _persona()
+            user_context = user_prompt
+            if st.session_state.session_rag_context:
+                user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
 
-                # Use selected model for General Assistant
-                selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
-                if selected_model == "o3-mini":
-                    client = st.session_state.o3_client
-                    deployment = st.session_state.O3_DEPLOYMENT
+            # Use selected model for General Assistant
+            selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+            if selected_model == "o3":
+                client = st.session_state.o3_client
+                deployment = st.session_state.O3_DEPLOYMENT
+            else:
+                client = st.session_state.gpt41_client
+                deployment = st.session_state.GPT41_DEPLOYMENT
+
+            # Stream the response
+            # O3 models use max_completion_tokens instead of max_tokens and only support temperature=1
+            create_params = {
+                "model": deployment,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_context},
+                ],
+                "stream": True,
+            }
+            if selected_model == "o3":
+                create_params["max_completion_tokens"] = 700
+                # O3 only supports temperature=1, so don't set it (defaults to 1)
+            else:
+                create_params["max_tokens"] = 700
+                create_params["temperature"] = temp
+
+            stream = client.chat.completions.create(**create_params)
+
+            parts = []
+            reasoning_parts = []
+
+            # Track whether we're inside <think> tags for GPT-4.1
+            inside_think = False
+            think_parts = []
+            answer_parts = []
+            buffer = ""
+            thinking_placeholder = thinking_expander.empty()
+
+            for chunk in stream:
+                if st.session_state.stop_generation:
+                    st.warning("⚠️ Response generation stopped by user.")
+                    st.session_state.stop_generation = False
+                    st.session_state.is_generating = False
+                    st.stop()
+
+                # O3 models return reasoning in a separate field
+                if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
+                    if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+                        reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
+                        thinking_placeholder.markdown("".join(reasoning_parts))
+
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    parts.append(token)
+
+                    # For GPT-4.1, detect and separate <think> content
+                    if selected_model != "o3":
+                        buffer += token
+
+                        # Check for <think> tag opening
+                        if "<think>" in buffer and not inside_think:
+                            before_think = buffer.split("<think>")[0]
+                            answer_parts.append(before_think)
+                            buffer = buffer.split("<think>", 1)[1]
+                            inside_think = True
+
+                        # Check for </think> tag closing
+                        if "</think>" in buffer and inside_think:
+                            think_content = buffer.split("</think>")[0]
+                            think_parts.append(think_content)
+                            buffer = buffer.split("</think>", 1)[1]
+                            inside_think = False
+
+                            # Display thinking content in real-time
+                            thinking_placeholder.markdown("".join(think_parts))
+
+                        # Accumulate content based on current state
+                        if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
+                            # We're in answer mode and buffer has no partial tags
+                            answer_parts.append(buffer)
+                            buffer = ""
+                            # Display answer in real-time (without <think> tags)
+                            final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
+                        elif inside_think and not "</think>" in buffer:
+                            # We're in think mode, accumulate thinking
+                            think_parts.append(buffer)
+                            buffer = ""
+                            # Display thinking content in real-time
+                            thinking_placeholder.markdown("".join(think_parts))
+                    else:
+                        # For O3, just display the answer
+                        final_answer_placeholder.markdown("".join(parts) + " ▌")
+
+            # Handle any remaining buffer
+            if buffer:
+                if inside_think:
+                    think_parts.append(buffer)
                 else:
-                    client = st.session_state.gpt41_client
-                    deployment = st.session_state.GPT41_DEPLOYMENT
+                    answer_parts.append(buffer)
 
-                response = client.chat.completions.create(
-                    model=deployment,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_context},
-                    ],
-                    temperature=temp,
-                    max_tokens=700,
-                )
+            full_response = "".join(parts)
 
-                final_answer = response.choices[0].message.content.strip()
-                final_answer_placeholder.markdown(final_answer)
-                messages.append({"role": "assistant", "content": final_answer})
-                save_user_data(st.session_state.user_id, st.session_state.user_data)
+            # Final display updates
+            if selected_model == "o3":
+                final_answer_placeholder.markdown(full_response)
+                if reasoning_parts:
+                    thinking_placeholder.info("".join(reasoning_parts))
+            else:
+                answer_only = "".join(answer_parts)
+                final_answer_placeholder.markdown(answer_only)
+                if think_parts:
+                    thinking_placeholder.info("".join(think_parts))
+
+            messages.append({"role": "assistant", "content": full_response})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.is_generating = False
+
+            # Update scratchpads periodically for general conversation
+            if persona_type != "agentic" and len(messages) % 3 == 0:  # Every 3rd message
+                context = _analyze_conversation_context()
+                _update_scratchpad_sync('context_analysis', context)
 
         except Exception as e:
             st.error(f"Quick mode failed: {e}")
+            st.session_state.is_generating = False
+
+# ============================================================================
+# CHAT INPUT - PLACED AT END TO STAY AT BOTTOM
+# ============================================================================
+
+# Microphone button and chat input
+# If there's a pending transcription, show review form
+if st.session_state.pending_transcription:
+    # Display the transcription in an editable text area for user review
+    with st.form(key="transcription_review_form", clear_on_submit=True):
+        st.write("**Edit transcription if needed, then submit:**")
+        edited_text = st.text_area(
+            "Transcribed text:",
+            value=st.session_state.pending_transcription,
+            height=100,
+            label_visibility="collapsed"
+        )
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
+        with col2:
+            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+        if submit_button and edited_text.strip():
+            messages.append({"role": "user", "content": edited_text.strip()})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.session_state.message_processed = False
+            st.rerun()
+        elif cancel_button:
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.rerun()
+else:
+    # Add CSS to position mic button to the right of chat input
+    st.markdown("""
+        <style>
+        /* Create a flex container for chat input area */
+        .chat-input-row {
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        /* Chat input takes most space */
+        .chat-input-row .stChatInput {
+            flex: 1;
+        }
+        /* Mic button stays on the right */
+        .mic-button-right {
+            width: 70px;
+            flex-shrink: 0;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Create row with chat input and mic button side by side
+    col_chat, col_mic = st.columns([0.92, 0.08], gap="small")
+
+    with col_mic:
+        # Microphone button
+        try:
+            rec = mic_recorder(
+                start_prompt="🎤",
+                stop_prompt="⏹️",
+                just_once=True,
+                use_container_width=True,
+                key="mic_inline",
+                format="webm",
+            )
+        except TypeError:
+            rec = mic_recorder(
+                start_prompt="🎤",
+                stop_prompt="⏹️",
+                just_once=True,
+                use_container_width=True,
+                key="mic_inline"
+            )
+
+    # Handle microphone recording
+    if rec and rec.get("bytes"):
+        raw_bytes = rec["bytes"]
+
+        with st.spinner("🎤 Transcribing audio..."):
+            wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
+            if not wav16k:
+                st.error("❌ Could not prepare audio for transcription.")
+                st.session_state.transcription_status = "error"
+            else:
+                text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
+                if text.strip():
+                    st.session_state.pending_transcription = text.strip()
+                    st.session_state.transcription_status = "success"
+                    st.rerun()
+                else:
+                    st.warning("⚠️ No speech recognized. Please try again.")
+                    st.session_state.transcription_status = "empty"
+
+    with col_chat:
+        # Chat input (automatically pins to bottom when last element)
+        if prompt := st.chat_input("Ask anything..."):
+            messages.append({"role": "user", "content": prompt})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.message_processed = False
+            st.rerun()
 
