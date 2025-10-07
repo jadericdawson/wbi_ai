@@ -8678,17 +8678,11 @@ You can:
 
         def _classify_intent(prompt_text: str) -> str:
             """
-            Returns: 'knowledge_base_query' | 'fact_correction' | 'general_conversation'
+            Returns: 'knowledge_base_query' | 'general_conversation'
             Uses RAG toggle for direct control. No LLM call needed.
+            Note: 'fact_correction' is only triggered by explicit button clicks, not automatic detection.
             """
             try:
-                prompt_lower = prompt_text.lower()
-
-                # Fact correction indicators (check first, most specific)
-                if any(phrase in prompt_lower for phrase in ['just so you know', 'for your information',
-                                                               'remember that', 'note that', 'fyi']):
-                    return "fact_correction"
-
                 # Use RAG mode toggle for direct control
                 if st.session_state.get("use_rag_mode", False):
                     return "knowledge_base_query"
@@ -9177,8 +9171,9 @@ You can:
                 with st.spinner("Interpreting new fact for confirmation..."):
                     fact_extraction_prompt = (
                         "You are an AI assistant. The user provided a new fact. "
-                        "Rephrase it into a clear Question and Answer pair. Respond ONLY as "
-                        '{"question":"...","answer":"..."} '
+                        "Rephrase it into a clear Question and Answer pair. "
+                        "Respond ONLY with valid JSON in this format: "
+                        '{"question":"...","answer":"..."}\n\n'
                         f'User statement: "{user_prompt}"'
                     )
                     resp = st.session_state.gpt41_client.chat.completions.create(
