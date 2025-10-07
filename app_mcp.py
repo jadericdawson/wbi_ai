@@ -3711,6 +3711,15 @@ def ensure_16k_mono_wav(audio_bytes_or_str: bytes | str, ext_hint: str = "wav") 
     try:
         snd = AudioSegment.from_file(BytesIO(raw), format=fmt)
     except Exception as e:
+        # Check if FFmpeg is missing (common on Azure App Service)
+        if "ffprobe" in str(e) or "ffmpeg" in str(e):
+            st.error(
+                "⚠️ Audio transcription requires FFmpeg, which is not installed on this server. "
+                "Please type your message instead of using voice input. "
+                "To enable audio: Install FFmpeg on your deployment environment."
+            )
+            return b""
+
         # Try a few alternates if sniffing fails
         for alt in ("wav", "webm", "ogg", "mp3", "m4a"):
             if alt == fmt:
