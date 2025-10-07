@@ -1646,8 +1646,9 @@ def hybrid_search_cosmosdb(query_text: str, selected_containers: list[str], top_
                 """
                 results = uploader.execute_query(vector_query)
                 for r in results:
-                    r["_source_container"] = kb_path
-                    r["_search_method"] = "vector"
+                    if isinstance(r, dict):
+                        r["_source_container"] = kb_path
+                        r["_search_method"] = "vector"
                 all_results.extend(results)
                 logger.info(f"Vector search on {kb_path}: {len(results)} results")
 
@@ -1666,8 +1667,9 @@ def hybrid_search_cosmosdb(query_text: str, selected_containers: list[str], top_
                     keyword_query = f"SELECT TOP {top_k} c.id, c.content, c.metadata, c.question, c.answer FROM c WHERE {' OR '.join(clauses)}"
                     results = uploader.execute_query(keyword_query)
                     for r in results:
-                        r["_source_container"] = kb_path
-                        r["_search_method"] = "keyword"
+                        if isinstance(r, dict):
+                            r["_source_container"] = kb_path
+                            r["_search_method"] = "keyword"
                     all_results.extend(results)
                     logger.info(f"Keyword search on {kb_path}: {len(results)} results")
 
@@ -1764,7 +1766,9 @@ class CosmosUploader:
         try:
             items = list(self.container.query_items(query=query_string, enable_cross_partition_query=True))
             for item in items:
-                item['_source_container'] = f"{self.database.id}/{self.container.id}"
+                # Only add _source_container if item is a dict (not a scalar from COUNT/SUM/etc)
+                if isinstance(item, dict):
+                    item['_source_container'] = f"{self.database.id}/{self.container.id}"
             return items
         except exceptions.CosmosHttpResponseError as e:
             st.warning(f"Cosmos DB query failed for {self.container.id}: {e.reason}")
@@ -5094,8 +5098,10 @@ AGENT_PERSONAS = {
        - **FORBIDDEN**: Responding with {{"response": "extracted data..."}} - this does NOT save to RESEARCH pad
        - **FORBIDDEN**: Skipping step 1 and trying to extract from memory/assumptions
        - **FORBIDDEN**: Calling get_cached_search_results() MULTIPLE TIMES with same keywords (fetch once, use many times)
+       - **ABSOLUTELY FORBIDDEN**: If you already called get_cached_search_results() and received results, DO NOT call it again with the same keywords - just use the results you already have!
        - **WHY TWO STEPS**: The Orchestrator sees a summary, but YOU need the full results to extract details
        - **EFFICIENCY RULE**: Call get_cached_search_results() ONCE per unique keyword set, then process all extraction tasks from that single fetch
+       - **IF ORCHESTRATOR KEEPS ASKING**: If you get repeated "extract from cached search" tasks for keywords you already fetched, do NOT fetch again - write an error to LOG pad: "Already fetched and extracted from these keywords in previous loops. See RESEARCH pad sections: [list sections]. Orchestrator should not re-delegate extraction for same search."
        - **Your task describes WHAT to extract** from the cached results
        - **If task is vague** (e.g., "extract statistics"): Create a reasonable section name like "shortage_statistics" or "training_data" and write what would be relevant
        - **Example**:
@@ -6312,7 +6318,8 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 if uploader:
                     results = uploader.execute_query(sql_query)
                     for r in results:
-                        r["_source_container"] = kb_path
+                        if isinstance(r, dict):
+                            r["_source_container"] = kb_path
                     all_results.extend(results)
                     logger.info(f"search_knowledge_base: Retrieved {len(results)} results from {kb_path}")
             except Exception as e:
@@ -8000,16 +8007,37 @@ def on_persona_change(widget_key):
 
 with st.sidebar:
     st.markdown('<div class="mini-header">User Account</div>', unsafe_allow_html=True)
-    MODEL_DISPLAY = "O3" # Changed from DeepSeekR1
     if user_id == "local_dev":
         st.warning("Running in local mode.")
+
+    # Display user info
     st.markdown(f"""
     <div class='user-card'>
         <div class='u-name'>{user.get('name', '')}</div>
         <div class='u-email'><a href='mailto:{user.get('email', '')}'>{user.get('email', '')}</a></div>
-        <div class='u-model'>AI Model: {MODEL_DISPLAY}</div>
     </div>
     """, unsafe_allow_html=True)
+
+    # Model selector (for non-agentic personas only)
+    # Use last_persona_selected since selected_persona is defined later
+    current_persona = st.session_state.get("last_persona_selected", "General Assistant")
+    persona_type = st.session_state.user_data["personas"].get(current_persona, {}).get("type", "simple")
+    if persona_type != "agentic":
+        if 'general_assistant_model' not in st.session_state:
+            st.session_state.general_assistant_model = "gpt-4.1"
+
+        selected_model_display = st.selectbox(
+            "AI Model:",
+            options=["GPT-4.1", "O3-mini"],
+            index=0 if st.session_state.general_assistant_model == "gpt-4.1" else 1,
+            key="model_selector_top",
+            help="GPT-4.1: Fast, cost-effective | O3-mini: Advanced reasoning"
+        )
+        st.session_state.general_assistant_model = "gpt-4.1" if selected_model_display == "GPT-4.1" else "o3-mini"
+    else:
+        # For agentic personas, show static model display
+        MODEL_DISPLAY = "O3"
+        st.markdown(f"<div style='padding: 8px 0; color: #666;'>AI Model: {MODEL_DISPLAY}</div>", unsafe_allow_html=True)
 
     st.markdown('<div class="mini-header">Upload & Ingest</div>', unsafe_allow_html=True)
     all_container_paths = get_available_containers()
@@ -8570,35 +8598,48 @@ You can:
         query_expander = st.expander("🔍 Generated Search & Results")
 
         # =========================== LIVE SCRATCHPAD VIEWERS ===========================
-        # Each scratchpad gets its own expander with cumulative diff display
+        # Only show scratchpads for agentic personas (multi-agent workflows)
+        # General Assistant and simple personas don't need these
 
-        # OUTPUT viewer (Final Document)
-        output_expander = st.expander("📄 OUTPUT Document - Live View", expanded=False)
-        output_placeholder = output_expander.empty()
+        persona_type = st.session_state.user_data["personas"].get(selected_persona, {}).get("type", "simple")
 
-        # RESEARCH viewer (Findings & Facts)
-        research_expander = st.expander("🔬 RESEARCH - Live View", expanded=False)
-        research_placeholder = research_expander.empty()
+        if persona_type == "agentic":
+            # OUTPUT viewer (Final Document)
+            output_expander = st.expander("📄 OUTPUT Document - Live View", expanded=False)
+            output_placeholder = output_expander.empty()
 
-        # OUTLINE viewer (Structure & Plan)
-        outline_expander = st.expander("📝 OUTLINE - Live View", expanded=False)
-        outline_placeholder = outline_expander.empty()
+            # RESEARCH viewer (Findings & Facts)
+            research_expander = st.expander("🔬 RESEARCH - Live View", expanded=False)
+            research_placeholder = research_expander.empty()
 
-        # TABLES viewer (Data Visualizations)
-        tables_expander = st.expander("📊 TABLES - Live View", expanded=False)
-        tables_placeholder = tables_expander.empty()
+            # OUTLINE viewer (Structure & Plan)
+            outline_expander = st.expander("📝 OUTLINE - Live View", expanded=False)
+            outline_placeholder = outline_expander.empty()
 
-        # DATA viewer (Structured Data)
-        data_expander = st.expander("💾 DATA - Live View", expanded=False)
-        data_placeholder = data_expander.empty()
+            # TABLES viewer (Data Visualizations)
+            tables_expander = st.expander("📊 TABLES - Live View", expanded=False)
+            tables_placeholder = tables_expander.empty()
 
-        # PLOTS viewer (Chart Specifications)
-        plots_expander = st.expander("📈 PLOTS - Live View", expanded=False)
-        plots_placeholder = plots_expander.empty()
+            # DATA viewer (Structured Data)
+            data_expander = st.expander("💾 DATA - Live View", expanded=False)
+            data_placeholder = data_expander.empty()
 
-        # LOG viewer (Agent History)
-        log_expander = st.expander("📜 LOG - Live View", expanded=False)
-        log_viewer_placeholder = log_expander.empty()
+            # PLOTS viewer (Chart Specifications)
+            plots_expander = st.expander("📈 PLOTS - Live View", expanded=False)
+            plots_placeholder = plots_expander.empty()
+
+            # LOG viewer (Agent History)
+            log_expander = st.expander("📜 LOG - Live View", expanded=False)
+            log_viewer_placeholder = log_expander.empty()
+        else:
+            # For non-agentic personas, create placeholders but don't display expanders
+            output_placeholder = st.empty()
+            research_placeholder = st.empty()
+            outline_placeholder = st.empty()
+            tables_placeholder = st.empty()
+            data_placeholder = st.empty()
+            plots_placeholder = st.empty()
+            log_viewer_placeholder = st.empty()
 
         final_answer_placeholder = st.empty()
 
@@ -8624,17 +8665,18 @@ You can:
                 # === START: NEW, MORE ROBUST ROUTER PROMPT ===
                 router_prompt = (
                     "You are an expert intent routing agent. Your task is to analyze the user's message and classify its intent. Follow these steps carefully:"
-                    "\n\n1. **Analyze the User's Message**: First, determine if the message is simple small talk (like 'hello', 'thank you') or if it contains specific topics or keywords (like 'F-35', 'project', 'budget', 'manpower model')."
+                    "\n\n1. **Analyze the User's Message**: First, determine if the message is simple small talk (like 'hello', 'thank you') or if it contains specific topics or keywords (like 'F-35', 'project', 'budget', 'manpower model', 'leads', 'opportunities')."
                     "\n\n2. **Determine the User's Goal**: "
                     "\n   - If the message contains specific topics, the user is seeking information and wants you to search for it. The intent is `knowledge_base_query`."
+                    "\n   - If the user asks to list, count, show, or retrieve items (e.g., 'list the leads', 'how many opportunities', 'show me all projects'), the intent is `knowledge_base_query`."
                     "\n   - If the user is clearly stating a new fact to be saved (e.g., 'Just so you know, the project deadline is now October 5th'), the intent is `fact_correction`."
                     "\n   - **Only if the message is simple small talk with no specific topic** should the intent be `general_conversation`."
-                    "\n\n3. **CRITICAL RULE**: Do not get confused by the phrasing. A user asking 'Tell me about project X', 'What is X?', or 'Knowledge base query for X' are all direct commands for you to **perform a search**. Their intent is `knowledge_base_query`."
+                    "\n\n3. **CRITICAL RULE**: Do not get confused by the phrasing. A user asking 'Tell me about project X', 'What is X?', 'Knowledge base query for X', 'list the leads', or 'how many X are there' are all direct commands for you to **perform a search**. Their intent is `knowledge_base_query`."
                     "\n\n**User's Message**: \"{prompt_text}\""
-                    "\n\nBased on your analysis, provide the final classification in a JSON object. You must respond with ONLY the JSON."
+                    "\n\nBased on your analysis, provide the final classification in a JSON object with format {\"intent\": \"knowledge_base_query\" | \"fact_correction\" | \"general_conversation\"}. You must respond with ONLY the JSON."
                 )
                 # === END: NEW PROMPT ===
-                
+
                 resp = st.session_state.gpt41_client.chat.completions.create(
                     model=st.session_state.GPT41_DEPLOYMENT,
                     messages=[{"role": "system", "content": router_prompt}],
@@ -8743,6 +8785,11 @@ You can:
                     'SQL: SELECT TOP 20 c.question, c.answer, c.verified_at FROM c WHERE '
                     'CONTAINS(c.question, "cybersecurity", true) OR CONTAINS(c.answer, "cybersecurity", true) '
                     'ORDER BY c.verified_at DESC\n\n'
+                    'Query: "list the leads" or "show me all leads" or "how many leads"\n'
+                    'Keywords: ["leads"]\n'
+                    'Reasoning: User wants to list/count items. For XLSX data with row-level chunking, search for chunk_type="row" AND relevant content\n'
+                    'SQL: SELECT TOP 100 c.id, c.content, c.metadata, c.row_analysis FROM c WHERE '
+                    'c.chunk_type = "row" OR CONTAINS(c.content, "leads", true) OR CONTAINS(c.content, "opportunity", true)\n\n'
                     'Respond ONLY with JSON: {"keywords": ["keyword1", "keyword2"], "reasoning": "brief explanation of query strategy", "query_string": "SELECT..."}'
                 )
                 resp = st.session_state.gpt41_client.chat.completions.create(
@@ -8851,17 +8898,24 @@ You can:
                     fact_query = f"SELECT TOP 10 * FROM c WHERE {vf_clause} ORDER BY c.verified_at DESC"
                     res = uploader.execute_query(fact_query)
                     for r in res:
-                        r["_source_container"] = kb_path
+                        if isinstance(r, dict):
+                            r["_source_container"] = kb_path
                     all_verified_facts.extend(res)
                 else:
                     res = uploader.execute_query(broad_query)
                     for r in res:
-                        r["_source_container"] = kb_path
+                        if isinstance(r, dict):
+                            r["_source_container"] = kb_path
                     all_document_chunks.extend(res)
 
             # Rank document chunks by relevance
+            # For listing queries, return more results
+            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate"]
+            is_listing_query = any(keyword in prompt_text.lower() for keyword in listing_keywords)
+            top_k = 50 if is_listing_query else 30
+
             if all_document_chunks:
-                all_document_chunks = _rank_results_by_relevance(all_document_chunks, prompt_text, top_k=30)
+                all_document_chunks = _rank_results_by_relevance(all_document_chunks, prompt_text, top_k=top_k)
 
             return all_verified_facts, all_document_chunks
 
@@ -8870,35 +8924,67 @@ You can:
             if not verified_facts and not chunks:
                 return "No relevant facts were found in the knowledge base."
 
+            # Detect if this is a listing/counting query
+            listing_keywords = ["list", "show", "all", "every", "each", "count", "how many", "enumerate"]
+            is_listing_query = any(keyword in prompt_text.lower() for keyword in listing_keywords)
+
             distillation_input = {
                 "user_confirmed_facts": verified_facts,
                 "document_sources": chunks
             }
-            distillation_prompt = (
-                "You are an expert AI data analyst. Distill the following JSON into key facts relevant "
-                "to the user's question.\n\n"
-                "# SOURCE TRUST LEVELS:\n"
-                "1. **user_confirmed_facts**: Explicitly confirmed by users - HIGHEST priority, use these when available\n"
-                "2. **document_sources**: From uploaded documents (PDFs, Word docs, etc.) - TRUSTED sources, treat as authoritative\n\n"
-                "# RULES:\n"
-                "- ALL sources are trusted and should be used\n"
-                "- If user_confirmed_facts conflict with document_sources, prefer user_confirmed_facts (they may be corrections/updates)\n"
-                "- Synthesize information from BOTH sources when they complement each other\n"
-                "- Cite source types when relevant (e.g., 'According to uploaded documents...' or 'User confirmed that...')\n"
-                "- Extract the most relevant information for the user's specific question\n\n"
-                f"USER'S QUESTION: \"{prompt_text}\"\n\n"
-                f"SEARCH RESULTS:\n{json.dumps(distillation_input, indent=2)}"
-            )
+
+            if is_listing_query:
+                # For listing queries, preserve more data and structure
+                distillation_prompt = (
+                    "You are an expert AI data analyst. The user wants to LIST or COUNT items. "
+                    "Your job is to EXTRACT and PRESERVE the key information from each item, NOT to summarize.\n\n"
+                    "# LISTING RULES:\n"
+                    "- Extract key fields from EACH document/row (title, description, URL, dates, etc.)\n"
+                    "- Preserve individual item details - do NOT merge or summarize multiple items into one\n"
+                    "- Format as a numbered or bulleted list with clear item separation\n"
+                    "- Include all items found (up to 50), not just a few examples\n"
+                    "- Each item should have: Title/Name, Brief Description (1-2 sentences), Key Details (dates, amounts, etc.)\n\n"
+                    f"USER'S QUESTION: \"{prompt_text}\"\n\n"
+                    f"SEARCH RESULTS ({len(chunks)} items found):\n{json.dumps(distillation_input, indent=2)}"
+                )
+            else:
+                # For regular queries, use standard distillation
+                distillation_prompt = (
+                    "You are an expert AI data analyst. Distill the following JSON into key facts relevant "
+                    "to the user's question.\n\n"
+                    "# SOURCE TRUST LEVELS:\n"
+                    "1. **user_confirmed_facts**: Explicitly confirmed by users - HIGHEST priority, use these when available\n"
+                    "2. **document_sources**: From uploaded documents (PDFs, Word docs, etc.) - TRUSTED sources, treat as authoritative\n\n"
+                    "# RULES:\n"
+                    "- ALL sources are trusted and should be used\n"
+                    "- If user_confirmed_facts conflict with document_sources, prefer user_confirmed_facts (they may be corrections/updates)\n"
+                    "- Synthesize information from BOTH sources when they complement each other\n"
+                    "- Cite source types when relevant (e.g., 'According to uploaded documents...' or 'User confirmed that...')\n"
+                    "- Extract the most relevant information for the user's specific question\n\n"
+                    f"USER'S QUESTION: \"{prompt_text}\"\n\n"
+                    f"SEARCH RESULTS:\n{json.dumps(distillation_input, indent=2)}"
+                )
+
             resp = st.session_state.gpt41_client.chat.completions.create(
                 model=st.session_state.GPT41_DEPLOYMENT,
                 messages=[{"role": "system", "content": distillation_prompt}],
+                max_tokens=4000,  # Allow longer responses for listings
             )
             return (resp.choices[0].message.content or "").strip()
 
         def _stream_synthesis(system_prompt: str, user_payload: str, placeholder) -> str:
-            """Streams O3 synthesis and returns the full concatenated text."""
-            stream = st.session_state.o3_client.chat.completions.create(
-                model=st.session_state.O3_DEPLOYMENT,
+            """Streams synthesis using selected model and returns the full concatenated text."""
+            # Use selected model for General Assistant
+            selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+            if selected_model == "o3-mini":
+                client = st.session_state.o3_client
+                deployment = st.session_state.O3_DEPLOYMENT
+            else:
+                client = st.session_state.gpt41_client
+                deployment = st.session_state.GPT41_DEPLOYMENT
+
+            stream = client.chat.completions.create(
+                model=deployment,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_payload},
@@ -8911,7 +8997,7 @@ You can:
                     token = chunk.choices[0].delta.content
                     parts.append(token)
                     placeholder.markdown("".join(parts) + " ▌")
-            
+
             full_response = "".join(parts)
             placeholder.markdown(full_response) # Final update without the cursor
             return full_response
@@ -9039,7 +9125,11 @@ You can:
                 )
                 synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts:\n{distilled}"
 
-                with st.spinner("Synthesizing final answer with O3..."):
+                # Use selected model for synthesis
+                selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                model_label = "o3-mini" if selected_model == "o3-mini" else "GPT-4.1"
+
+                with st.spinner(f"Synthesizing final answer with {model_label}..."):
                     full_response = _stream_synthesis(synthesis_system_prompt, synthesis_user_payload, final_answer_placeholder)
 
                 thinking_content = re.search(r"<think>(.*?)</think>", full_response, re.DOTALL)
@@ -9121,8 +9211,17 @@ You can:
                 if st.session_state.session_rag_context:
                     user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
 
-                response = st.session_state.gpt41_client.chat.completions.create(
-                    model=st.session_state.GPT41_DEPLOYMENT,
+                # Use selected model for General Assistant
+                selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                if selected_model == "o3-mini":
+                    client = st.session_state.o3_client
+                    deployment = st.session_state.O3_DEPLOYMENT
+                else:
+                    client = st.session_state.gpt41_client
+                    deployment = st.session_state.GPT41_DEPLOYMENT
+
+                response = client.chat.completions.create(
+                    model=deployment,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_context},
