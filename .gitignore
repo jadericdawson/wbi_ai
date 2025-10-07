@@ -58,8 +58,9 @@ Thumbs.db
 *copy*
 *Copy*
 
-# Ignore all markdown documentation files
+# Ignore all markdown documentation files (except README.md)
 *.md
+!README.md
 
 # Ignore specific utility files
 indent_fix.py
