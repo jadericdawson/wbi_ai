@@ -11042,6 +11042,79 @@ if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
 
 # ============================================================================
+# CHAT INPUT - POSITIONED AFTER CHAT MESSAGES, BEFORE MESSAGE PROCESSING
+# ============================================================================
+# This allows chat input to be visible at the bottom of chat history
+
+# Handle pending transcription first
+if st.session_state.pending_transcription:
+    # Display the transcription in an editable text area for user review
+    with st.form(key="transcription_review_form", clear_on_submit=True):
+        st.write("**Edit transcription if needed, then submit:**")
+        edited_text = st.text_area(
+            "Transcribed text:",
+            value=st.session_state.pending_transcription,
+            height=100,
+            label_visibility="collapsed"
+        )
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
+        with col2:
+            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+        if submit_button and edited_text.strip():
+            messages.append({"role": "user", "content": edited_text.strip()})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.session_state.message_processed = False
+            st.rerun()
+        elif cancel_button:
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.rerun()
+else:
+    # Regular chat input
+    with st.container():
+        col_chat, col_mic = st.columns([6, 1])
+
+        with col_mic:
+            if st.button("🎤", help="Record audio message", use_container_width=True, key="mic_button_main"):
+                st.session_state.show_recording = True
+                st.rerun()
+
+        with col_chat:
+            # Chat input
+            if prompt := st.chat_input("Ask anything..."):
+                messages.append({"role": "user", "content": prompt})
+                save_user_data(st.session_state.user_id, st.session_state.user_data)
+                st.session_state.message_processed = False
+                st.rerun()
+
+# Recording interface
+if st.session_state.get("show_recording", False):
+    with st.container():
+        st.info("🎤 **Recording...** Click 'Stop' when finished.")
+
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("⏹️ Stop Recording", use_container_width=True, type="primary"):
+                st.session_state.show_recording = False
+                # Simulate recording completion
+                if st.session_state.get("simulated_audio_bytes"):
+                    st.session_state.pending_transcription = "Transcribed text will appear here..."
+                    st.session_state.transcription_status = "success"
+                else:
+                    st.session_state.transcription_status = "empty"
+                st.rerun()
+
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state.show_recording = False
+                st.rerun()
+
+# ============================================================================
 # MESSAGE PROCESSING
 # ============================================================================
 
@@ -12266,75 +12339,5 @@ Your next prompt will resume with all this context intact.""")
 # ============================================================================
 # END OF MESSAGE PROCESSING
 # ============================================================================
-
-# ============================================================================
-# CHAT INPUT - POSITIONED AFTER ALL OUTPUT
-# ============================================================================
-
-# Handle pending transcription first
-if st.session_state.pending_transcription:
-    # Display the transcription in an editable text area for user review
-    with st.form(key="transcription_review_form", clear_on_submit=True):
-        st.write("**Edit transcription if needed, then submit:**")
-        edited_text = st.text_area(
-            "Transcribed text:",
-            value=st.session_state.pending_transcription,
-            height=100,
-            label_visibility="collapsed"
-        )
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
-        with col2:
-            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
-
-        if submit_button and edited_text.strip():
-            messages.append({"role": "user", "content": edited_text.strip()})
-            save_user_data(st.session_state.user_id, st.session_state.user_data)
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            st.session_state.message_processed = False
-            st.rerun()
-        elif cancel_button:
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            st.rerun()
-else:
-    # Regular chat input
-    with st.container():
-        col_chat, col_mic = st.columns([6, 1])
-
-        with col_mic:
-            if st.button("🎤", help="Record audio message", use_container_width=True, key="mic_button_main"):
-                st.session_state.show_recording = True
-                st.rerun()
-
-        with col_chat:
-            # Chat input
-            if prompt := st.chat_input("Ask anything..."):
-                messages.append({"role": "user", "content": prompt})
-                save_user_data(st.session_state.user_id, st.session_state.user_data)
-                st.session_state.message_processed = False
-                st.rerun()
-
-# Recording interface
-if st.session_state.get("show_recording", False):
-    with st.container():
-        st.info("🎤 **Recording...** Click 'Stop' when finished.")
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("⏹️ Stop Recording", use_container_width=True, type="primary"):
-                st.session_state.show_recording = False
-                # Simulate recording completion
-                if st.session_state.get("simulated_audio_bytes"):
-                    st.session_state.pending_transcription = "Transcribed text will appear here..."
-                    st.session_state.transcription_status = "success"
-                else:
-                    st.session_state.transcription_status = "empty"
-                st.rerun()
-
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True):
-                st.session_state.show_recording = False
-                st.rerun()
+# Note: Chat input is now positioned after chat messages (line ~11045)
+# This keeps it visible at the bottom of chat history
