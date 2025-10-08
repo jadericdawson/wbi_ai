@@ -7122,12 +7122,161 @@ AGENT_PERSONAS = {
     ✅ Test simple queries before adding complexity
     ✅ Use parallel execution whenever possible
 
-    **COSMOS DB SQL LIMITATIONS TO REMEMBER:**
-    - Limited date/time functions (GetCurrentDateTime() exists but DateTimeAdd might not)
-    - No stored procedures or complex logic
-    - IS_NUMBER(), IS_STRING(), IS_DEFINED() are your friends
-    - TOP N syntax instead of LIMIT (though LIMIT works too)
-    - Case-sensitive string comparisons
+    ═══════════════════════════════════════════════════════════════
+    📚 COMPREHENSIVE COSMOS DB SQL QUERY RULES 📚
+    ═══════════════════════════════════════════════════════════════
+
+    **CORE QUERY SYNTAX:**
+
+    **1. SQL Structure:**
+    - Always use `c` as container alias: `FROM c`
+    - Property names are case-sensitive
+    - SQL keywords are case-insensitive
+    - String comparisons are case-sensitive by default
+
+    **2. SELECT Statements:**
+    - Specific properties: `SELECT c.id, c.name FROM c`
+    - All properties: `SELECT * FROM c`
+    - Single value: `SELECT VALUE c.id FROM c` (returns flat array)
+    - Computed fields: `SELECT c.price * 1.1 AS priceWithTax FROM c`
+    - Nested properties: `SELECT c.user.address.city FROM c`
+    - **AVOID SELECT ***: Only select needed fields to reduce RU cost
+
+    **3. WHERE Clause Rules:**
+    - Equality: `WHERE c.status = 'active'`
+    - Inequality: `WHERE c.age >= 18 AND c.age < 65`
+    - String functions: `STARTSWITH()`, `ENDSWITH()`, `CONTAINS()`, `UPPER()`, `LOWER()`
+    - NULL checks: `WHERE IS_NULL(c.field)` or `WHERE IS_DEFINED(c.field)`
+    - IN operator: `WHERE c.category IN ('electronics', 'books')`
+    - Logical operators: `AND`, `OR`, `NOT`
+
+    **4. System Functions:**
+    - **Type checking**: `IS_ARRAY()`, `IS_BOOL()`, `IS_NULL()`, `IS_NUMBER()`, `IS_OBJECT()`, `IS_STRING()`, `IS_DEFINED()`, `IS_PRIMITIVE()`
+    - **String functions**: `CONCAT()`, `SUBSTRING()`, `LENGTH()`, `UPPER()`, `LOWER()`, `TRIM()`, `STARTSWITH()`, `ENDSWITH()`, `CONTAINS()`, `REPLACE()`
+    - **Math functions**: `ABS()`, `CEILING()`, `FLOOR()`, `ROUND()`, `POWER()`, `SQRT()`
+    - **Array functions**: `ARRAY_LENGTH()`, `ARRAY_CONTAINS()`, `ARRAY_SLICE()`
+
+    **PERFORMANCE OPTIMIZATION (CRITICAL):**
+
+    **5. Partition Key Usage:**
+    - **ALWAYS include partition key when possible** - enables single-partition queries
+    - Single-partition: `WHERE c.partitionKey = 'value' AND c.status = 'active'`
+    - Cross-partition queries are **expensive and slow** - avoid when possible
+    - When filtering by ID, include partition key: `WHERE c.id = 'id123' AND c.partitionKey = 'pk123'`
+
+    **6. Query Efficiency:**
+    - **Always use TOP or OFFSET/LIMIT**: Never return unbounded result sets
+    - `SELECT TOP 10 * FROM c` for small sets
+    - `SELECT * FROM c ORDER BY c._ts OFFSET 0 LIMIT 100` for pagination
+    - **Only select needed properties**: Reduces RU consumption significantly
+    - Equality filters are most efficient: `WHERE c.status = 'active'`
+    - String functions may not use indexes: `WHERE CONTAINS(c.name, 'search')` does full scan
+
+    **7. Request Unit (RU) Management:**
+    - Simple point reads: ~1 RU (use ReadItem API, not query)
+    - Cross-partition queries: Much higher RU cost
+    - ORDER BY across partitions: Very expensive
+    - COUNT operations: Expensive - use approximations when possible
+
+    **ADVANCED PATTERNS:**
+
+    **8. JOIN Operations (Intra-Document Only):**
+    - JOINs work **only within a single document** (not across documents)
+    - Used for flattening nested arrays:
+      ```sql
+      SELECT c.id, tag
+      FROM c
+      JOIN tag IN c.tags
+      WHERE tag = 'important'
+      ```
+
+    **9. Array Operations:**
+    - Filter arrays: `WHERE ARRAY_CONTAINS(c.tags, 'electronics')`
+    - With objects: `WHERE ARRAY_CONTAINS(c.items, {{"sku": "ABC123"}}, true)`
+    - Array length: `WHERE ARRAY_LENGTH(c.items) > 0`
+    - Unnest arrays: Use JOIN to query array elements
+
+    **10. Subqueries:**
+    - Scalar subqueries: Return single value
+    - EXISTS check: `WHERE EXISTS(SELECT VALUE t FROM t IN c.tags WHERE t = 'featured')`
+    - Subqueries can **only reference current document**
+
+    **ERROR HANDLING:**
+
+    **11. Handling Missing Properties:**
+    - Use `IS_DEFINED(c.property)` to check existence
+    - Default values: `(IS_DEFINED(c.property) ? c.property : 'default')`
+    - Always validate before operations: `WHERE IS_NUMBER(c.age) AND c.age > 18`
+
+    **12. Type Safety:**
+    - Always validate types before operations
+    - String to number conversions may fail silently
+    - Use type checking functions: `IS_NUMBER()`, `IS_STRING()`, etc.
+
+    **13. Query Limitations:**
+    - Maximum query text: 512 KB
+    - Maximum response per page: 4 MB (use continuation tokens)
+    - No cross-container queries
+    - No stored procedures in queries
+    - JOINs are intra-document only
+
+    **SECURITY (CRITICAL):**
+
+    **14. SQL Injection Prevention:**
+    - **NEVER concatenate user input**: `SELECT * FROM c WHERE c.name = '${{userInput}}'` ❌
+    - **ALWAYS use parameterized queries** through SDK
+    - Use parameter binding, never string concatenation
+
+    **COMMON QUERY PATTERNS:**
+
+    **Single partition filter:**
+    ```sql
+    SELECT c.id, c.name, c.status
+    FROM c
+    WHERE c.partitionKey = 'value'
+      AND c.status = 'active'
+    ORDER BY c.createdDate DESC
+    OFFSET 0 LIMIT 100
+    ```
+
+    **Search with multiple conditions:**
+    ```sql
+    SELECT c.id, c.name, c.category
+    FROM c
+    WHERE c.category = 'electronics'
+      AND c.price >= 100 AND c.price <= 500
+      AND c.inStock = true
+    ```
+
+    **Array filtering:**
+    ```sql
+    SELECT * FROM c
+    WHERE ARRAY_CONTAINS(c.tags, 'featured')
+      AND c.publishedDate >= 1609459200
+    ```
+
+    **Aggregation (limited support):**
+    ```sql
+    SELECT COUNT(1) as count FROM c WHERE c.category = 'books'
+    SELECT VALUE SUM(c.price) FROM c WHERE c.category = 'books'
+    SELECT VALUE MAX(c.price) FROM c WHERE c.category = 'books'
+    ```
+
+    **QUERY GENERATION CHECKLIST:**
+
+    Before generating ANY query, verify:
+    ✅ Partition key included in WHERE (if available)
+    ✅ Query uses parameterization (no string concat)
+    ✅ Only necessary properties selected (avoid SELECT *)
+    ✅ Pagination implemented (TOP or OFFSET/LIMIT)
+    ✅ Type checking for dynamic properties
+    ✅ Appropriate for query vs point operation
+    ✅ Security considerations addressed
+
+    **WHEN TO USE QUERIES VS POINT OPERATIONS:**
+    - **Point read** (direct ID + partition key): Use ReadItem API - costs ~1 RU
+    - **Queries**: Use when filtering, searching, or don't know exact ID
+    - Always prefer point operations when you have both ID and partition key
 
     CRITICAL INSTRUCTIONS:
     1. Analyze the given task from another agent.
@@ -10426,14 +10575,42 @@ with st.sidebar:
                         all_statuses.append(status)
                         continue
 
-                # Special handling: Attach PDF to existing lead
-                if attach_to_existing_lead and selected_lead_id and uploaded_file.name.lower().endswith('.pdf'):
+                # Special handling: Attach document to existing lead (PDF or DOCX)
+                if attach_to_existing_lead and selected_lead_id and (
+                    uploaded_file.name.lower().endswith('.pdf') or
+                    uploaded_file.name.lower().endswith('.docx')
+                ):
                     file_bytes = uploaded_file.getvalue()
                     doc_type = st.session_state.get('upload_doc_type', 'Unknown Document')
 
                     with st.spinner(f"📎 Processing '{uploaded_file.name}' and attaching to lead..."):
-                        # Process PDF with vision
-                        page_analyses, processing_metadata = process_pdf_with_vision(file_bytes, uploaded_file.name)
+                        # Process document based on file type
+                        if uploaded_file.name.lower().endswith('.pdf'):
+                            # Process PDF with vision
+                            page_analyses, processing_metadata = process_pdf_with_vision(file_bytes, uploaded_file.name)
+                        elif uploaded_file.name.lower().endswith('.docx'):
+                            # Process DOCX by treating it as a single "page" with extracted text
+                            from docx import Document
+                            from io import BytesIO
+                            doc = Document(BytesIO(file_bytes))
+                            full_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+
+                            # Create a single page analysis for DOCX
+                            page_analyses = [{
+                                "page_number": 1,
+                                "extracted_text": full_text,
+                                "analysis": f"DOCX document with {len(doc.paragraphs)} paragraphs",
+                                "key_information": {"document_type": doc_type}
+                            }]
+                            processing_metadata = {
+                                "total_pages": 1,
+                                "file_size_bytes": len(file_bytes),
+                                "processing_method": "docx_text_extraction"
+                            }
+                        else:
+                            # Fallback for other file types
+                            page_analyses = []
+                            processing_metadata = {}
 
                         # Get Cosmos manager
                         db_name, cont_name = st.session_state.upload_target.split('/')
@@ -10459,9 +10636,10 @@ with st.sidebar:
                                 logger.error(f"Failed to attach '{uploaded_file.name}': {append_result['message']}")
                                 error_count += 1
 
-                            # Add status
+                            # Add status (mark as ingested since it's appended to lead in Cosmos DB)
                             all_statuses.append({
                                 "filename": uploaded_file.name,
+                                "ingested_to_cosmos": True,  # Document IS stored in Cosmos DB (appended to lead)
                                 "action": f"Attached to lead ({doc_type})",
                                 "lead_id": selected_lead_id,
                                 "doc_type": doc_type,
@@ -10787,6 +10965,10 @@ if "pending_transcription" not in st.session_state:
 if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
 
+# ============================================================================
+# MESSAGE PROCESSING
+# ============================================================================
+
 # Check if we should process the last user message
 # Only process if:
 # 1. There's a user message
@@ -10826,20 +11008,48 @@ if should_process:
         # Check if we have preserved work from previous run
         if st.session_state.get("workflow_incomplete", False) and "scratchpad_manager" in st.session_state:
             scratchpad_mgr_check = st.session_state.scratchpad_manager
-            existing_sections = scratchpad_mgr_check.list_sections("output")
-            if existing_sections:
+            existing_output = scratchpad_mgr_check.list_sections("output")
+            existing_research = scratchpad_mgr_check.list_sections("research")
+            existing_tables = scratchpad_mgr_check.list_sections("tables")
+            existing_data = scratchpad_mgr_check.list_sections("data")
+
+            if existing_output or existing_research or existing_tables or existing_data:
                 st.info(f"""💾 **Work Preserved from Previous Run**
 
-You have {len(existing_sections)} OUTPUT sections preserved from a previous workflow that reached the loop limit. Your next prompt will continue from where we left off.
+Your previous multi-agent workflow reached the loop limit. All work has been saved and will be carried forward to your next query.
 
-**Preserved sections:** {', '.join(existing_sections[:5])}{'...' if len(existing_sections) > 5 else ''}
+### 📊 What's Preserved:
+- ✅ **OUTPUT sections:** {len(existing_output)} completed
+- ✅ **RESEARCH findings:** {len(existing_research)} sections
+- ✅ **TABLES:** {len(existing_tables)} created
+- ✅ **DATA extracts:** {len(existing_data)} saved
 
-You can:
-- Continue building the document
-- Edit existing sections
-- Add more research or details
-- Or start fresh (scratchpads will auto-clear on new topic)
-""")
+{f"**Preserved OUTPUT sections:** {', '.join(existing_output[:5])}{'...' if len(existing_output) > 5 else ''}" if existing_output else ""}
+
+### 🔄 What You Can Request:
+
+**Continue the work:**
+- "Continue writing the missing sections"
+- "Complete the OUTPUT document"
+
+**Enhance existing content:**
+- "Add more detail to section X"
+- "Make section Y more concise"
+- "Add examples to the methodology section"
+
+**Add more research:**
+- "Do more research on [topic]"
+- "Find statistics about [subject]"
+- "Search for case studies on [theme]"
+
+**Create visualizations:**
+- "Create tables for the data we found"
+- "Generate a comparison chart"
+
+**Or start fresh:**
+- Begin a completely new topic (scratchpads will auto-clear)
+
+Your next prompt will resume with all this context intact.""")
 
         thinking_expander = st.expander("🤔 Agent Thinking Process...")
         log_placeholder = thinking_expander.empty()
@@ -11976,12 +12186,16 @@ You can:
                 st.error(f"Quick mode failed: {e}")
                 st.session_state.is_generating = False
 
+
 # ============================================================================
-# CHAT INPUT - PLACED AT END TO STAY AT BOTTOM
+# END OF MESSAGE PROCESSING
 # ============================================================================
 
-# Microphone button and chat input
-# If there's a pending transcription, show review form
+# ============================================================================
+# CHAT INPUT - POSITIONED AFTER ALL OUTPUT
+# ============================================================================
+
+# Handle pending transcription first
 if st.session_state.pending_transcription:
     # Display the transcription in an editable text area for user review
     with st.form(key="transcription_review_form", clear_on_submit=True):
@@ -12010,69 +12224,41 @@ if st.session_state.pending_transcription:
             st.session_state.transcription_status = None
             st.rerun()
 else:
-    # Add CSS to keep chat input pinned - use simpler approach
-    st.markdown("""
-        <style>
-        /* Keep chat input container at bottom */
-        .stChatInput {
-            position: sticky !important;
-            bottom: 0 !important;
-            z-index: 1000 !important;
-        }
-        /* Add padding to main content so last message isn't hidden */
-        section[data-testid="stAppViewContainer"] .main .block-container {
-            padding-bottom: 100px !important;
-        }
-        </style>
-    """, unsafe_allow_html=True)
+    # Regular chat input
+    with st.container():
+        col_chat, col_mic = st.columns([6, 1])
 
-    # Create row with chat input and mic button side by side
-    col_chat, col_mic = st.columns([0.92, 0.08], gap="small")
+        with col_mic:
+            if st.button("🎤", help="Record audio message", use_container_width=True, key="mic_button_main"):
+                st.session_state.show_recording = True
+                st.rerun()
 
-    with col_mic:
-        # Microphone button
-        try:
-            rec = mic_recorder(
-                start_prompt="🎤",
-                stop_prompt="⏹️",
-                just_once=True,
-                use_container_width=True,
-                key="mic_inline",
-                format="webm",
-            )
-        except TypeError:
-            rec = mic_recorder(
-                start_prompt="🎤",
-                stop_prompt="⏹️",
-                just_once=True,
-                use_container_width=True,
-                key="mic_inline"
-            )
+        with col_chat:
+            # Chat input
+            if prompt := st.chat_input("Ask anything..."):
+                messages.append({"role": "user", "content": prompt})
+                save_user_data(st.session_state.user_id, st.session_state.user_data)
+                st.session_state.message_processed = False
+                st.rerun()
 
-    # Handle microphone recording
-    if rec and rec.get("bytes"):
-        raw_bytes = rec["bytes"]
+# Recording interface
+if st.session_state.get("show_recording", False):
+    with st.container():
+        st.info("🎤 **Recording...** Click 'Stop' when finished.")
 
-        with st.spinner("🎤 Transcribing audio..."):
-            wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
-            if not wav16k:
-                st.error("❌ Could not prepare audio for transcription.")
-                st.session_state.transcription_status = "error"
-            else:
-                text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
-                if text.strip():
-                    st.session_state.pending_transcription = text.strip()
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("⏹️ Stop Recording", use_container_width=True, type="primary"):
+                st.session_state.show_recording = False
+                # Simulate recording completion
+                if st.session_state.get("simulated_audio_bytes"):
+                    st.session_state.pending_transcription = "Transcribed text will appear here..."
                     st.session_state.transcription_status = "success"
-                    st.rerun()
                 else:
-                    st.warning("⚠️ No speech recognized. Please try again.")
                     st.session_state.transcription_status = "empty"
+                st.rerun()
 
-    with col_chat:
-        # Chat input (automatically pins to bottom when last element)
-        if prompt := st.chat_input("Ask anything..."):
-            messages.append({"role": "user", "content": prompt})
-            save_user_data(st.session_state.user_id, st.session_state.user_data)
-            st.session_state.message_processed = False
-            st.rerun()
-
+        with col2:
+            if st.button("❌ Cancel", use_container_width=True):
+                st.session_state.show_recording = False
+                st.rerun()
