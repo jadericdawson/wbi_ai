@@ -12617,43 +12617,9 @@ else:
     col_chat, col_mic = st.columns([6, 1])
 
     with col_mic:
-        # Microphone recording with actual audio capture
-        try:
-            rec = mic_recorder(
-                start_prompt="🎤",
-                stop_prompt="⏹️",
-                just_once=True,
-                use_container_width=True,
-                key="mic_inline",
-                format="webm",
-            )
-        except TypeError:
-            rec = mic_recorder(
-                start_prompt="🎤",
-                stop_prompt="⏹️",
-                just_once=True,
-                use_container_width=True,
-                key="mic_inline"
-            )
-
-    # Handle microphone recording
-    if rec and rec.get("bytes"):
-        raw_bytes = rec["bytes"]
-
-        with st.spinner("🎤 Transcribing audio..."):
-            wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
-            if not wav16k:
-                st.error("❌ Could not prepare audio for transcription.")
-                st.session_state.transcription_status = "error"
-            else:
-                text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
-                if text.strip():
-                    st.session_state.pending_transcription = text.strip()
-                    st.session_state.transcription_status = "success"
-                    st.rerun()
-                else:
-                    st.warning("⚠️ No speech recognized. Please try again.")
-                    st.session_state.transcription_status = "empty"
+        if st.button("🎤", help="Record audio message", use_container_width=True, key="mic_button_main"):
+            st.session_state.show_recording = True
+            st.rerun()
 
     with col_chat:
         # Chat input
@@ -12673,6 +12639,55 @@ else:
             messages.append({"role": "user", "content": prompt})
             save_user_data(st.session_state.user_id, st.session_state.user_data)
             st.session_state.message_processed = False
+            st.rerun()
+
+# Recording interface
+if st.session_state.get("show_recording", False):
+    with st.container():
+        st.info("🎤 **Recording...** Speak now, then click Stop.")
+
+        # Actual microphone recorder component
+        try:
+            rec = mic_recorder(
+                start_prompt="⏺️ Start",
+                stop_prompt="⏹️ Stop",
+                just_once=False,
+                use_container_width=True,
+                key="mic_recorder_active",
+                format="webm",
+            )
+        except TypeError:
+            rec = mic_recorder(
+                start_prompt="⏺️ Start",
+                stop_prompt="⏹️ Stop",
+                just_once=False,
+                use_container_width=True,
+                key="mic_recorder_active"
+            )
+
+        # Handle microphone recording
+        if rec and rec.get("bytes"):
+            raw_bytes = rec["bytes"]
+            st.session_state.show_recording = False
+
+            with st.spinner("🎤 Transcribing audio..."):
+                wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
+                if not wav16k:
+                    st.error("❌ Could not prepare audio for transcription.")
+                    st.session_state.transcription_status = "error"
+                else:
+                    text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
+                    if text.strip():
+                        st.session_state.pending_transcription = text.strip()
+                        st.session_state.transcription_status = "success"
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ No speech recognized. Please try again.")
+                        st.session_state.transcription_status = "empty"
+
+        # Cancel button
+        if st.button("❌ Cancel", use_container_width=True, key="cancel_recording"):
+            st.session_state.show_recording = False
             st.rerun()
 
 # ============================================================================
