@@ -19,8 +19,8 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Document Processing
-import fitz  # PyMuPDF
 import pymupdf4llm
+import pymupdf as fitz  # Use pymupdf instead of fitz directly
 import docx
 
 # Azure Cosmos DB
@@ -51,6 +51,9 @@ load_dotenv()
 # Set up logging for debugging tool issues
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
+# Suppress annoying Streamlit ScriptRunContext warnings
+logging.getLogger("streamlit.runtime.scriptrunner_utils.script_run_context").setLevel(logging.ERROR)
 
 # spaCy not needed - using LLM agents for all extraction
 
@@ -1120,11 +1123,13 @@ def get_current_user():
 # --- Load Credentials ---
 if "credentials_loaded" not in st.session_state:
     # GPT-4.1 for Vision & Query Generation
+    # Context: 1M tokens input, 32k tokens output
     st.session_state.GPT41_ENDPOINT = os.getenv("AZURE_AI_SEARCH_ENDPOINT")
     st.session_state.GPT41_API_KEY = os.getenv("AZURE_AI_SEARCH_API_KEY")
     st.session_state.GPT41_DEPLOYMENT = os.getenv("GPT41_DEPLOYMENT")
 
-    # O3 for Chat Synthesis
+    # O3 for Chat Synthesis & Multi-Agent Orchestration
+    # Context: 200k tokens input, 100k tokens output
     st.session_state.O3_DEPLOYMENT = os.getenv("O3_DEPLOYMENT_NAME")
 
     # Speech-to-Text Credentials
@@ -1147,87 +1152,91 @@ if missing:
     st.error(f"🚨 Missing required environment variables: **{', '.join(missing)}**.")
     st.stop()
 
-# --- Startup Verification Block ---
-with st.expander("Startup Credential Verification", expanded=False):
-    st.write("Verifying connections to Azure AI services...")
-    all_verified = True
+# Detect if running in local development mode
+IS_LOCAL = os.getenv("ENVIRONMENT", "production") == "local" or os.getenv("STREAMLIT_ENV") == "local"
 
-    # 1) Verify + cache GPT-4.1 (Query Gen & Vision)
-    st.markdown("--- \n**Checking GPT-4.1 Connection...**")
-    try:
-        st.info(f"Initializing client for GPT-4.1 at: {st.session_state.GPT41_ENDPOINT}")
-        if "gpt41_client" not in st.session_state:
-            st.session_state.gpt41_client = AzureOpenAI(
-                azure_endpoint=st.session_state.GPT41_ENDPOINT,
-                api_key=st.session_state.GPT41_API_KEY,
-                api_version="2024-05-01-preview"
-            )
-        gpt41_client = st.session_state.gpt41_client
-        st.info(f"Verifying deployment '{st.session_state.GPT41_DEPLOYMENT}'...")
-        response = st.session_state.gpt41_client.chat.completions.create(
-            model=st.session_state.GPT41_DEPLOYMENT,
-            messages=[{"role": "user", "content": "Test connection"}]
-        )
-        st.success(f"✅ GPT-4.1 connection successful. Test response: '{response.choices[0].message.content.strip()}'")
-    except Exception as e:
-        st.error(f"❌ GPT-4.1 connection FAILED. Error: {e}")
-        all_verified = False
+# --- Startup Verification Block (Local Mode Only) ---
+if IS_LOCAL:
+    with st.expander("Startup Credential Verification", expanded=False):
+        st.write("Verifying connections to Azure AI services...")
+        all_verified = True
 
-    # 2) Verify + cache O3 (Primary Synthesis)
-    st.markdown("--- \n**Checking Synthesis Model (O3) Connection...**")
-    try:
-        st.info(f"Initializing O3 client for endpoint: {st.session_state.GPT41_ENDPOINT}")
-        if "o3_client" not in st.session_state:
-            token_provider = get_bearer_token_provider(
-                DefaultAzureCredential(),
-                "https://cognitiveservices.azure.com/.default"
-            )
-            st.session_state.o3_client = AzureOpenAI(
-                azure_endpoint=st.session_state.GPT41_ENDPOINT,
-                azure_ad_token_provider=token_provider,
-                api_version="2024-12-01-preview"
-            )
-        o3_client = st.session_state.o3_client
-        st.info(f"Verifying deployment '{st.session_state.O3_DEPLOYMENT}'...")
-        response = st.session_state.o3_client.chat.completions.create(
-            model=st.session_state.O3_DEPLOYMENT,
-            messages=[{"role": "user", "content": "Test connection"}],
-        )
-        st.success(f"✅ O3 synthesis model connection successful. Test response: '{response.choices[0].message.content.strip()}'")
-    except Exception as e:
-        st.error(f"❌ O3 synthesis model connection FAILED. Error: {e}")
-        all_verified = False
-
-    # 3) Verify + cache Speech Service
-    st.markdown("--- \n**Checking Speech Service Connection...**")
-    try:
-        st.info(f"Initializing Speech client for region: {st.session_state.SPEECH_REGION}")
-        if "speech_config" not in st.session_state:
-            st.session_state.speech_config = speechsdk.SpeechConfig(
-                subscription=st.session_state.SPEECH_KEY,
-                region=st.session_state.SPEECH_REGION
-            )
-        # Optional mini ping:
+        # 1) Verify + cache GPT-4.1 (Query Gen & Vision)
+        st.markdown("--- \n**Checking GPT-4.1 Connection...**")
         try:
-            synthesizer = speechsdk.SpeechSynthesizer(speech_config=st.session_state.speech_config, audio_config=None)
-            result = synthesizer.speak_text_async("ping").get()
-            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-                st.success("✅ Azure Speech synthesis reachable.")
-            else:
-                # If synthesis blocked by policy/device, config still valid—treat as soft pass
-                st.warning(f"⚠️ Speech reachable but synthesis not completed: {result.reason}")
-        except Exception:
-            st.success("✅ Azure Speech Service configured successfully.")
-    except Exception as e:
-        st.error(f"❌ Azure Speech Service configuration FAILED. Error: {e}")
-        all_verified = False
+            st.info(f"Initializing client for GPT-4.1 at: {st.session_state.GPT41_ENDPOINT}")
+            if "gpt41_client" not in st.session_state:
+                st.session_state.gpt41_client = AzureOpenAI(
+                    azure_endpoint=st.session_state.GPT41_ENDPOINT,
+                    api_key=st.session_state.GPT41_API_KEY,
+                    api_version="2024-05-01-preview"
+                )
+            gpt41_client = st.session_state.gpt41_client
+            st.info(f"Verifying deployment '{st.session_state.GPT41_DEPLOYMENT}'...")
+            response = st.session_state.gpt41_client.chat.completions.create(
+                model=st.session_state.GPT41_DEPLOYMENT,
+                messages=[{"role": "user", "content": "Test connection"}]
+            )
+            st.success(f"✅ GPT-4.1 connection successful. Test response: '{response.choices[0].message.content.strip()}'")
+        except Exception as e:
+            st.error(f"❌ GPT-4.1 connection FAILED. Error: {e}")
+            all_verified = False
 
-    # 4) Final Check
-    if not all_verified:
-        st.error("One or more primary AI service connections failed. The application cannot continue.")
-        st.stop()
-    else:
-        st.success("All primary AI services connected successfully.")
+        # 2) Verify + cache O3 (Primary Synthesis)
+        st.markdown("--- \n**Checking Synthesis Model (O3) Connection...**")
+        try:
+            st.info(f"Initializing O3 client for endpoint: {st.session_state.GPT41_ENDPOINT}")
+            if "o3_client" not in st.session_state:
+                token_provider = get_bearer_token_provider(
+                    DefaultAzureCredential(),
+                    "https://cognitiveservices.azure.com/.default"
+                )
+                st.session_state.o3_client = AzureOpenAI(
+                    azure_endpoint=st.session_state.GPT41_ENDPOINT,
+                    azure_ad_token_provider=token_provider,
+                    api_version="2024-12-01-preview"
+                )
+            o3_client = st.session_state.o3_client
+            st.info(f"Verifying deployment '{st.session_state.O3_DEPLOYMENT}'...")
+            response = st.session_state.o3_client.chat.completions.create(
+                model=st.session_state.O3_DEPLOYMENT,
+                messages=[{"role": "user", "content": "Test connection"}],
+            )
+            st.success(f"✅ O3 synthesis model connection successful. Test response: '{response.choices[0].message.content.strip()}'")
+        except Exception as e:
+            st.error(f"❌ O3 synthesis model connection FAILED. Error: {e}")
+            all_verified = False
+
+        # 3) Verify + cache Speech Service
+        st.markdown("--- \n**Checking Speech Service Connection...**")
+        try:
+            st.info(f"Initializing Speech client for region: {st.session_state.SPEECH_REGION}")
+            if "speech_config" not in st.session_state:
+                st.session_state.speech_config = speechsdk.SpeechConfig(
+                    subscription=st.session_state.SPEECH_KEY,
+                    region=st.session_state.SPEECH_REGION
+                )
+            # Optional mini ping:
+            try:
+                synthesizer = speechsdk.SpeechSynthesizer(speech_config=st.session_state.speech_config, audio_config=None)
+                result = synthesizer.speak_text_async("ping").get()
+                if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
+                    st.success("✅ Azure Speech synthesis reachable.")
+                else:
+                    # If synthesis blocked by policy/device, config still valid—treat as soft pass
+                    st.warning(f"⚠️ Speech reachable but synthesis not completed: {result.reason}")
+            except Exception:
+                st.success("✅ Azure Speech Service configured successfully.")
+        except Exception as e:
+            st.error(f"❌ Azure Speech Service configuration FAILED. Error: {e}")
+            all_verified = False
+
+        # 4) Final Check
+        if not all_verified:
+            st.error("One or more primary AI service connections failed. The application cannot continue.")
+            st.stop()
+        else:
+            st.success("All primary AI services connected successfully.")
 
 
 STORAGE_ACCOUNT_URL = os.getenv("STORAGE_ACCOUNT_URL")
@@ -2005,8 +2014,7 @@ Respond with the populated JSON."""
                 {"role": "user", "content": context}
             ],
             response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
+            temperature=0.0
         )
 
         metadata = json.loads(response.choices[0].message.content)
@@ -2080,8 +2088,7 @@ Respond with only the bullet points."""
                 response = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": map_prompt}],
-                    temperature=0.0,
-                    max_tokens=500
+                    temperature=0.0
                 )
                 chunk_summary = response.choices[0].message.content
                 chunk_summaries.append(chunk_summary)
@@ -2121,8 +2128,7 @@ Respond in JSON format:
             model=model,
             messages=[{"role": "user", "content": reduce_prompt}],
             response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=2000
+            temperature=0.0
         )
         summary = json.loads(response.choices[0].message.content)
         return summary
@@ -2214,8 +2220,7 @@ Respond with only the populated JSON matching the schema."""
                 {"role": "user", "content": context}
             ],
             response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
+            temperature=0.0
         )
 
         extracted = json.loads(response.choices[0].message.content)
@@ -2364,8 +2369,7 @@ Be thorough and extract EVERYTHING visible on the page."""
                 ]
             }],
             response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=4000
+            temperature=0.0
         )
 
         analysis = json.loads(response.choices[0].message.content)
@@ -2676,7 +2680,7 @@ def process_csv_with_agents(file_bytes: bytes, filename: str) -> Dict[str, Any]:
 
 Format your response as JSON with these keys: purpose, key_columns, patterns, entities, insights, summary"""
 
-        analysis_response = o3_client.chat.completions.create(
+        analysis_response = st.session_state.o3_client.chat.completions.create(
             model=st.session_state.O3_DEPLOYMENT,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -2861,8 +2865,7 @@ Respond with the populated JSON. Be thorough - extract every organization, perso
                 {"role": "user", "content": context}
             ],
             response_format={"type": "json_object"},
-            temperature=0.0,
-            max_tokens=2000
+            temperature=0.0
         )
 
         entities = json.loads(response.choices[0].message.content)
@@ -2874,10 +2877,1738 @@ Respond with the populated JSON. Be thorough - extract every organization, perso
         return extraction_schema
 
 
-def process_xlsx_with_agents(file_bytes: bytes, filename: str, cosmos_manager=None, parent_doc_id: str = None) -> Dict[str, Any]:
+def detect_urls_in_row(row_data: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """
+    Detect all URLs in a row of Excel data.
+    Returns: List of (field_name, url) tuples
+    """
+    import re
+    import pandas as pd
+    url_pattern = re.compile(
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+    )
+
+    found_urls = []
+    for field_name, value in row_data.items():
+        if not value or pd.isna(value):
+            continue
+
+        value_str = str(value)
+
+        # Check if entire value is a URL
+        if url_pattern.match(value_str):
+            found_urls.append((field_name, value_str))
+        # Check if value contains URLs
+        elif url_pattern.search(value_str):
+            urls = url_pattern.findall(value_str)
+            for url in urls:
+                found_urls.append((field_name, url))
+
+    return found_urls
+
+
+def scrape_with_playwright(url: str, timeout: int = 30000) -> Dict[str, Any]:
+    """
+    Scrape JavaScript-rendered content using Playwright.
+    Also extracts PDF attachment download URLs from SAM.gov pages.
+    Returns: {success: bool, text: str, html: str, pdf_attachments: List[Dict], error: str}
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+
+        result = {"success": False, "text": "", "html": "", "pdf_attachments": [], "error": None}
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+
+            # Navigate and wait for network idle
+            page.goto(url, wait_until="networkidle", timeout=timeout)
+
+            # Wait a bit more for dynamic content
+            page.wait_for_timeout(3000)
+
+            # Get rendered HTML and text
+            result["html"] = page.content()
+            result["text"] = page.inner_text("body")
+
+            # Extract PDF attachment URLs (SAM.gov specific)
+            try:
+                # SAM.gov uses multiple attachment patterns
+                # Pattern 1: Look for download links with .pdf extension
+                pdf_links = page.query_selector_all('a[href*=".pdf"]')
+
+                # Pattern 2: SAM.gov attachment table rows
+                # The attachments are in a table with class or specific structure
+                attachment_rows = page.query_selector_all('tr[class*="attachment"], tbody tr')
+
+                # Pattern 3: Download buttons/links
+                download_buttons = page.query_selector_all('button[title*="Download"], a[aria-label*="Download"]')
+
+                # Combine all found attachments
+                found_attachments = set()  # Use set to avoid duplicates
+
+                # Process direct PDF links
+                for link in pdf_links:
+                    href = link.get_attribute('href')
+                    if href and '.pdf' in href.lower():
+                        # Make absolute URL if relative
+                        if href.startswith('/'):
+                            from urllib.parse import urljoin
+                            href = urljoin(url, href)
+
+                        file_name = link.inner_text().strip()
+                        if not file_name or file_name == "":
+                            file_name = href.split('/')[-1].split('?')[0]
+
+                        found_attachments.add((file_name, href))
+
+                # Process attachment table rows (SAM.gov specific)
+                for row in attachment_rows:
+                    try:
+                        # Look for cells containing file names and download links
+                        cells = row.query_selector_all('td')
+                        if len(cells) >= 2:
+                            # First cell often has the file name
+                            file_name_elem = cells[0].query_selector('a, span, div')
+                            if file_name_elem:
+                                file_name = file_name_elem.inner_text().strip()
+                                if '.pdf' in file_name.lower():
+                                    # Look for download link in the row
+                                    download_link = row.query_selector('a[href*=".pdf"], a[download], button[title*="Download"]')
+                                    if download_link:
+                                        href = download_link.get_attribute('href')
+                                        if href:
+                                            if href.startswith('/'):
+                                                from urllib.parse import urljoin
+                                                href = urljoin(url, href)
+                                            found_attachments.add((file_name, href))
+                                    else:
+                                        # Sometimes the download URL is in onclick or data attributes
+                                        onclick = row.get_attribute('onclick') or ""
+                                        if 'download' in onclick.lower() or 'pdf' in onclick.lower():
+                                            # Extract URL from onclick (common pattern: onclick="downloadFile('URL')")
+                                            import re
+                                            url_match = re.search(r'["\']([^"\']*\.pdf[^"\']*)["\']', onclick)
+                                            if url_match:
+                                                href = url_match.group(1)
+                                                if href.startswith('/'):
+                                                    from urllib.parse import urljoin
+                                                    href = urljoin(url, href)
+                                                found_attachments.add((file_name, href))
+                    except Exception as e:
+                        logger.debug(f"  Could not process attachment row: {e}")
+                        continue
+
+                # Process download buttons
+                for button in download_buttons:
+                    try:
+                        # Get file name from nearby text or aria-label
+                        aria_label = button.get_attribute('aria-label') or ""
+                        title = button.get_attribute('title') or ""
+
+                        # Look for file name in parent row
+                        parent_row = button.evaluate_handle('el => el.closest("tr")')
+                        if parent_row:
+                            row_text = parent_row.inner_text()
+                            if '.pdf' in row_text.lower():
+                                # Extract filename from row text
+                                import re
+                                filename_match = re.search(r'([^\n]+\.pdf)', row_text, re.IGNORECASE)
+                                if filename_match:
+                                    file_name = filename_match.group(1).strip()
+
+                                    # Get download URL
+                                    href = button.get_attribute('href')
+                                    if not href:
+                                        # Try onclick handler
+                                        onclick = button.get_attribute('onclick') or ""
+                                        url_match = re.search(r'["\']([^"\']*\.pdf[^"\']*)["\']', onclick)
+                                        if url_match:
+                                            href = url_match.group(1)
+
+                                    if href:
+                                        if href.startswith('/'):
+                                            from urllib.parse import urljoin
+                                            href = urljoin(url, href)
+                                        found_attachments.add((file_name, href))
+                    except Exception as e:
+                        logger.debug(f"  Could not process download button: {e}")
+                        continue
+
+                # If we didn't find attachments using selectors, use AI to analyze the HTML
+                if not found_attachments:
+                    page_text = result["text"]
+                    if "Attachments" in page_text and ".pdf" in page_text.lower():
+                        logger.info(f"  📋 Found 'Attachments' section in text but no download links in DOM")
+                        logger.info(f"  🤖 Using AI to analyze HTML for download URLs...")
+
+                        # Use GPT-4.1 to analyze the HTML and find download patterns
+                        try:
+                            html_content = result["html"]
+
+                            # Extract just the attachments section to reduce token usage
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(html_content, 'html.parser')
+
+                            # Find attachments section
+                            attachments_section = soup.find(string=lambda text: text and 'Attachments' in text)
+                            if attachments_section:
+                                # Get parent container
+                                container = attachments_section.find_parent(['div', 'section', 'table'])
+                                if container:
+                                    attachments_html = str(container)[:10000]  # Limit to 10k chars
+
+                                    ai_prompt = f"""You are an expert at analyzing HTML to find file download URLs.
+
+HTML SNIPPET (Attachments section from SAM.gov):
+{attachments_html}
+
+PAGE TEXT (for context):
+{page_text[page_text.find('Attachments'):page_text.find('Attachments')+500] if 'Attachments' in page_text else 'N/A'}
+
+TASK:
+1. Find all PDF file names mentioned (e.g., "J_A Auto Notify Services_Redacted.pdf")
+2. For each PDF, find the download URL by looking for:
+   - <a href="..."> tags
+   - onclick handlers with URLs
+   - data-* attributes with file paths
+   - API endpoints or download URLs
+   - Form actions or button values
+
+3. SAM.gov common patterns:
+   - URLs might be relative (start with /) or absolute
+   - Downloads may use /api/file/download/ endpoints
+   - May require document IDs in the URL
+   - Look for patterns like: /download/{file_id} or /file/{document_id}
+
+Respond with JSON:
+{{
+  "pdfs_found": [
+    {{
+      "filename": "exact filename from HTML",
+      "download_url": "full or relative URL",
+      "extraction_method": "how you found it (e.g., 'href attribute', 'onclick handler', 'data-url')"
+    }}
+  ],
+  "notes": "any observations about the download mechanism"
+}}
+
+If you cannot find download URLs, explain why in the notes field."""
+
+                                    ai_response = st.session_state.gpt41_client.chat.completions.create(
+                                        model=st.session_state.GPT41_DEPLOYMENT,
+                                        messages=[
+                                            {"role": "system", "content": "You are an expert at analyzing HTML and extracting download URLs. Always respond with valid JSON."},
+                                            {"role": "user", "content": ai_prompt}
+                                        ],
+                                        response_format={"type": "json_object"},
+                                        temperature=0.1
+                                    )
+
+                                    ai_analysis = json.loads(ai_response.choices[0].message.content)
+                                    pdfs_found = ai_analysis.get('pdfs_found', [])
+
+                                    logger.info(f"  🤖 AI found {len(pdfs_found)} PDF(s): {ai_analysis.get('notes', 'No notes')}")
+
+                                    # Add AI-discovered PDFs
+                                    for pdf_info in pdfs_found:
+                                        file_name = pdf_info.get('filename', 'Unknown.pdf')
+                                        href = pdf_info.get('download_url', '')
+
+                                        if href:
+                                            # Make absolute URL if relative
+                                            if href.startswith('/'):
+                                                from urllib.parse import urljoin
+                                                href = urljoin(url, href)
+
+                                            found_attachments.add((file_name, href))
+                                            logger.info(f"  📎 AI extracted: {file_name} via {pdf_info.get('extraction_method', 'unknown')}")
+
+                        except Exception as e:
+                            logger.error(f"  ❌ AI HTML analysis failed: {e}")
+
+                        if not found_attachments:
+                            logger.warning(f"  ⚠️  PDF files mentioned in page but download URLs not extractable")
+                            logger.warning(f"  💡 SAM.gov may require authentication or session cookies to download")
+
+                # Add all found attachments to result
+                for file_name, href in found_attachments:
+                    result["pdf_attachments"].append({
+                        "file_name": file_name,
+                        "url": href
+                    })
+                    logger.info(f"  📎 Found PDF attachment: {file_name}")
+
+                if not result["pdf_attachments"] and ".pdf" in page_text.lower():
+                    logger.warning(f"  ⚠️  PDF files mentioned in page text but download URLs not found")
+                    logger.warning(f"  💡 May need authentication or API access to download")
+
+            except Exception as e:
+                logger.warning(f"  ⚠️  Could not extract PDF attachments: {e}")
+
+            result["success"] = True
+            browser.close()
+
+        logger.info(f"  🎭 Playwright scrape successful: {len(result['text'])} chars, {len(result['pdf_attachments'])} PDF(s)")
+        return result
+
+    except ImportError:
+        logger.warning("  ⚠️  Playwright not installed. Install with: pip install playwright && playwright install chromium")
+        return {"success": False, "text": "", "html": "", "error": "Playwright not installed"}
+    except Exception as e:
+        logger.error(f"  ❌ Playwright scrape failed: {e}")
+        return {"success": False, "text": "", "html": "", "error": str(e)}
+
+
+def scrape_with_vision(url: str) -> Dict[str, Any]:
+    """
+    Scrape by taking a screenshot and using GPT-4V to extract text.
+    Returns: {success: bool, text: str, error: str}
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+        import base64
+
+        result = {"success": False, "text": "", "error": None}
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1920, "height": 3000})
+
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            page.wait_for_timeout(3000)
+
+            # Take full page screenshot
+            screenshot_bytes = page.screenshot(full_page=True)
+            screenshot_b64 = base64.b64encode(screenshot_bytes).decode('utf-8')
+
+            browser.close()
+
+        # Use GPT-4V to extract text from screenshot
+        vision_prompt = """Extract ALL text content from this webpage screenshot.
+
+Focus on:
+- Project/opportunity title and description
+- Organization/agency information
+- Requirements and specifications
+- Deadlines and timeline
+- Budget/contract information
+- Contact details
+- Any codes or identifiers
+
+Provide comprehensive text extraction, preserving structure and details."""
+
+        vision_response = st.session_state.gpt41_client.chat.completions.create(
+            model=st.session_state.GPT41_DEPLOYMENT,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": vision_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}}
+                ]
+            }],
+            temperature=0.0
+        )
+
+        result["text"] = vision_response.choices[0].message.content
+        result["success"] = True
+        logger.info(f"  👁️  Vision scrape successful: {len(result['text'])} chars")
+        return result
+
+    except ImportError:
+        logger.warning("  ⚠️  Playwright not installed for vision scraping")
+        return {"success": False, "text": "", "error": "Playwright not installed"}
+    except Exception as e:
+        logger.error(f"  ❌ Vision scrape failed: {e}")
+        return {"success": False, "text": "", "error": str(e)}
+
+
+def evaluate_scrape_quality(text: str, url: str) -> Dict[str, Any]:
+    """
+    Use LLM to evaluate if scraped content is meaningful.
+    Returns: {is_sufficient: bool, reasoning: str, estimated_completeness: float}
+    """
+    if len(text) < 100:
+        return {
+            "is_sufficient": False,
+            "reasoning": f"Too short ({len(text)} chars) - likely failed to render JavaScript content",
+            "estimated_completeness": 0.0
+        }
+
+    # Quick heuristic checks
+    indicators = {
+        "has_project_keywords": any(kw in text.lower() for kw in ["project", "opportunity", "solicitation", "award", "contract"]),
+        "has_dates": any(kw in text.lower() for kw in ["deadline", "due", "date", "20"]),
+        "has_organization": any(kw in text.lower() for kw in ["agency", "department", "organization"]),
+        "has_requirements": any(kw in text.lower() for kw in ["requirement", "scope", "specification"]),
+        "sufficient_length": len(text) > 500
+    }
+
+    score = sum(indicators.values()) / len(indicators)
+
+    if score >= 0.6:
+        return {
+            "is_sufficient": True,
+            "reasoning": f"Good quality: {sum(indicators.values())}/{len(indicators)} indicators present",
+            "estimated_completeness": score
+        }
+    else:
+        return {
+            "is_sufficient": False,
+            "reasoning": f"Low quality: only {sum(indicators.values())}/{len(indicators)} indicators present",
+            "estimated_completeness": score
+        }
+
+
+def download_and_process_pdf_attachment(pdf_url: str, pdf_filename: str) -> Dict[str, Any]:
+    """
+    Download a PDF attachment and process it using the comprehensive vision analysis.
+
+    Args:
+        pdf_url: URL to download the PDF from
+        pdf_filename: Original filename of the PDF
+
+    Returns: {
+        "status": "success|failed",
+        "file_name": str,
+        "download_url": str,
+        "file_size_bytes": int,
+        "page_analyses": List[Dict],  # Full vision analysis for each page
+        "processing_metadata": Dict,
+        "error": str (if failed)
+    }
+    """
+    result = {
+        "status": "pending",
+        "file_name": pdf_filename,
+        "download_url": pdf_url,
+        "file_size_bytes": 0,
+        "page_analyses": [],
+        "processing_metadata": {},
+        "error": None
+    }
+
+    try:
+        import requests
+
+        logger.info(f"  📥 Downloading PDF: {pdf_filename}")
+
+        # Download PDF with timeout
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(pdf_url, headers=headers, timeout=60)
+        response.raise_for_status()
+
+        pdf_bytes = response.content
+        result["file_size_bytes"] = len(pdf_bytes)
+
+        logger.info(f"  ✅ Downloaded {len(pdf_bytes)} bytes")
+        logger.info(f"  🔍 Processing PDF with vision analysis...")
+
+        # Process PDF using existing vision pipeline
+        page_analyses, processing_metadata = process_pdf_with_vision(pdf_bytes, pdf_filename)
+
+        result["page_analyses"] = page_analyses
+        result["processing_metadata"] = processing_metadata
+        result["status"] = "success"
+
+        logger.info(f"  ✅ PDF processed: {processing_metadata.get('total_pages', 0)} pages analyzed")
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"  ❌ Failed to download PDF {pdf_filename}: {e}")
+        result["status"] = "failed"
+        result["error"] = f"Download error: {str(e)}"
+    except Exception as e:
+        logger.error(f"  ❌ Failed to process PDF {pdf_filename}: {e}")
+        result["status"] = "failed"
+        result["error"] = f"Processing error: {str(e)}"
+
+    return result
+
+
+def scrape_and_enrich_url(url: str, row_context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Adaptive multi-strategy scraping agent.
+    Tries multiple methods and evaluates quality:
+    1. Basic requests + BeautifulSoup (fast)
+    2. Playwright for JavaScript rendering (if insufficient)
+    3. Vision API with screenshot (if still insufficient)
+    """
+    import requests
+    from bs4 import BeautifulSoup
+    from datetime import datetime
+
+    result = {
+        'url': url,
+        'scraped_at': datetime.utcnow().isoformat(),
+        'status': 'pending',
+        'scrape_method': None,
+        'scrape_attempts': [],
+        'pdf_attachments': []  # PDF attachments found on the page
+    }
+
+    text = ""
+    page_title = None
+
+    # STRATEGY 1: Basic requests + BeautifulSoup (fast, works for static sites)
+    logger.info(f"  📄 Trying basic scrape...")
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+
+        response = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.content, 'html.parser')
+
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+
+        # Get text
+        text = soup.get_text(separator='\n', strip=True)
+        page_title = soup.title.string if soup.title else None
+
+        # Evaluate quality
+        quality = evaluate_scrape_quality(text, url)
+        result['scrape_attempts'].append({
+            'method': 'requests_beautifulsoup',
+            'text_length': len(text),
+            'quality_score': quality['estimated_completeness'],
+            'is_sufficient': quality['is_sufficient'],
+            'reasoning': quality['reasoning']
+        })
+
+        if quality['is_sufficient']:
+            logger.info(f"  ✅ Basic scrape sufficient: {len(text)} chars, quality {quality['estimated_completeness']:.2f}")
+            result['scrape_method'] = 'requests_beautifulsoup'
+            result['extracted_text'] = text
+            result['page_title'] = page_title
+        else:
+            logger.warning(f"  ⚠️  Basic scrape insufficient: {quality['reasoning']}")
+            # Try next strategy
+            raise Exception("Insufficient content from basic scrape")
+
+    except Exception as e:
+        logger.info(f"  ⚠️  Basic scrape failed or insufficient: {e}")
+
+        # STRATEGY 2: Playwright (handles JavaScript rendering)
+        logger.info(f"  🎭 Trying Playwright scrape...")
+        playwright_result = scrape_with_playwright(url)
+
+        if playwright_result['success']:
+            text = playwright_result['text']
+            quality = evaluate_scrape_quality(text, url)
+
+            # Capture PDF attachments found by Playwright
+            result['pdf_attachments'] = playwright_result.get('pdf_attachments', [])
+
+            result['scrape_attempts'].append({
+                'method': 'playwright',
+                'text_length': len(text),
+                'quality_score': quality['estimated_completeness'],
+                'is_sufficient': quality['is_sufficient'],
+                'reasoning': quality['reasoning']
+            })
+
+            if quality['is_sufficient']:
+                logger.info(f"  ✅ Playwright scrape sufficient: {len(text)} chars, quality {quality['estimated_completeness']:.2f}")
+                if result['pdf_attachments']:
+                    logger.info(f"  📎 Found {len(result['pdf_attachments'])} PDF attachment(s)")
+                result['scrape_method'] = 'playwright'
+                result['extracted_text'] = text
+                result['page_title'] = page_title or "Playwright extracted"
+            else:
+                logger.warning(f"  ⚠️  Playwright scrape insufficient: {quality['reasoning']}")
+                # Try vision as last resort
+                logger.info(f"  👁️  Trying Vision API scrape...")
+                vision_result = scrape_with_vision(url)
+
+                if vision_result['success']:
+                    text = vision_result['text']
+                    quality = evaluate_scrape_quality(text, url)
+
+                    result['scrape_attempts'].append({
+                        'method': 'vision_api',
+                        'text_length': len(text),
+                        'quality_score': quality['estimated_completeness'],
+                        'is_sufficient': quality['is_sufficient'],
+                        'reasoning': quality['reasoning']
+                    })
+
+                    logger.info(f"  ✅ Vision scrape: {len(text)} chars, quality {quality['estimated_completeness']:.2f}")
+                    result['scrape_method'] = 'vision_api'
+                    result['extracted_text'] = text
+                    result['page_title'] = "Vision API extracted"
+                else:
+                    logger.error(f"  ❌ All scrape methods failed")
+                    result['status'] = 'failed'
+                    result['error'] = f"All methods failed. Last error: {vision_result.get('error')}"
+                    return result
+        else:
+            logger.error(f"  ❌ Playwright unavailable: {playwright_result.get('error')}")
+            result['status'] = 'failed'
+            result['error'] = f"Basic scrape insufficient and Playwright unavailable: {playwright_result.get('error')}"
+            return result
+
+    # Scraping complete - structured extraction happens later in batch
+    result['status'] = 'success'
+    logger.info(f"  ✅ Successfully scraped: {url} using {result['scrape_method']}")
+
+    return result
+
+
+def match_document_to_leads(
+    document_filename: str,
+    document_preview_text: str,
+    all_leads: List[Dict[str, Any]],
+    top_n: int = 3
+) -> List[Dict[str, Any]]:
+    """
+    Uses AI to match an uploaded document to existing leads based on filename and content.
+
+    Args:
+        document_filename: Name of the uploaded document (e.g., "W911S7-25-R-A015_RFP.pdf")
+        document_preview_text: First page or preview text from the document
+        all_leads: List of all lead documents from Cosmos DB
+        top_n: Number of top matches to return (default 3)
+
+    Returns: List of matched leads with confidence scores:
+        [
+            {
+                "lead_id": str,
+                "title": str,
+                "notice_id": str,
+                "confidence": float (0-1),
+                "reasoning": str,
+                "missing_documents": List[str]
+            }
+        ]
+    """
+    logger.info(f"🤖 Using AI to match document '{document_filename}' to existing leads...")
+
+    if not all_leads:
+        logger.warning("  No leads available for matching")
+        return []
+
+    # Prepare lead summaries for AI analysis
+    lead_summaries = []
+    for lead in all_leads[:50]:  # Limit to 50 most recent to avoid token limits
+        original_data = lead.get('original_data', {})
+        doc_analysis = lead.get('document_analysis', {})
+
+        summary = {
+            "id": lead.get('id'),
+            "title": original_data.get('Opportunity Title', 'Unknown'),
+            "notice_id": original_data.get('Notice ID', 'N/A'),
+            "solicitation_number": original_data.get('Solicitation Number', 'N/A'),
+            "naics_code": original_data.get('NAICS Code', 'N/A'),
+            "set_aside": original_data.get('Set Aside', 'N/A'),
+            "missing_documents": doc_analysis.get('critical_missing_documents', [])
+        }
+        lead_summaries.append(summary)
+
+    # Create AI prompt for matching
+    matching_prompt = f"""You are an expert at matching government contracting documents to opportunities.
+
+**UPLOADED DOCUMENT:**
+- Filename: {document_filename}
+- Preview Text (first 500 chars):
+{document_preview_text[:500]}
+
+**AVAILABLE LEADS (opportunities in database):**
+{json.dumps(lead_summaries, indent=2)}
+
+**TASK:**
+Analyze the document filename and preview text to identify which lead(s) this document belongs to.
+
+**MATCHING CRITERIA:**
+1. Look for solicitation numbers in filename (e.g., "W911S7-25-R-A015")
+2. Check if document is in the missing_documents list
+3. Match keywords from preview text to opportunity titles
+4. Consider NAICS codes and set-aside types if mentioned
+
+**IMPORTANT:**
+- Be conservative: only suggest matches you're confident about
+- Confidence 0.9-1.0: Very strong match (solicitation number exact match)
+- Confidence 0.7-0.89: Strong match (title + keywords match)
+- Confidence 0.5-0.69: Possible match (some indicators align)
+- Confidence <0.5: Don't include
+
+Respond with JSON (return top {top_n} matches):
+{{
+  "matches": [
+    {{
+      "lead_id": "lead ID from list",
+      "confidence": 0.95,
+      "reasoning": "Solicitation number W911S7-25-R-A015 in filename matches lead notice_id"
+    }}
+  ]
+}}
+
+If no confident matches found, return {{"matches": []}}"""
+
+    try:
+        ai_response = st.session_state.gpt41_client.chat.completions.create(
+            model=st.session_state.GPT41_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You are an expert at matching documents to opportunities. Always respond with valid JSON."},
+                {"role": "user", "content": matching_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+
+        ai_result = json.loads(ai_response.choices[0].message.content)
+        matches = ai_result.get('matches', [])
+
+        logger.info(f"  🤖 AI found {len(matches)} potential match(es)")
+
+        # Enrich matches with full lead details
+        enriched_matches = []
+        for match in matches[:top_n]:
+            lead_id = match.get('lead_id')
+            lead = next((l for l in all_leads if l.get('id') == lead_id), None)
+
+            if lead:
+                original_data = lead.get('original_data', {})
+                doc_analysis = lead.get('document_analysis', {})
+
+                enriched_matches.append({
+                    "lead_id": lead_id,
+                    "title": original_data.get('Opportunity Title', 'Unknown'),
+                    "notice_id": original_data.get('Notice ID', 'N/A'),
+                    "solicitation_number": original_data.get('Solicitation Number', 'N/A'),
+                    "confidence": match.get('confidence', 0.0),
+                    "reasoning": match.get('reasoning', 'No reasoning provided'),
+                    "missing_documents": doc_analysis.get('critical_missing_documents', []),
+                    "enrichment_status": lead.get('enrichment_status', 'unknown')
+                })
+
+        return enriched_matches
+
+    except Exception as e:
+        logger.error(f"  ❌ AI lead matching failed: {e}")
+        return []
+
+
+def append_document_to_lead(
+    lead_id: str,
+    document_filename: str,
+    document_type: str,
+    page_analyses: List[Dict[str, Any]],
+    processing_metadata: Dict[str, Any],
+    cosmos_manager
+) -> Dict[str, Any]:
+    """
+    Appends a manually uploaded document (PDF) to an existing lead.
+
+    Args:
+        lead_id: The ID of the lead to append to
+        document_filename: Name of the uploaded document
+        document_type: Type hint (e.g., "RFP", "PWS", "Statement of Work")
+        page_analyses: PDF page-by-page vision analyses
+        processing_metadata: Processing metadata from PDF ingestion
+        cosmos_manager: Cosmos DB container manager
+
+    Returns: {
+        "status": "success|failed",
+        "lead_updated": bool,
+        "extraction_run": bool,
+        "message": str
+    }
+    """
+    from datetime import datetime
+
+    logger.info(f"📎 Appending document '{document_filename}' to lead: {lead_id}")
+
+    result = {
+        "status": "pending",
+        "lead_updated": False,
+        "extraction_run": False,
+        "message": ""
+    }
+
+    try:
+        # Fetch the existing lead document
+        lead_doc = cosmos_manager.container.read_item(item=lead_id, partition_key=lead_id)
+        logger.info(f"  ✅ Found lead: {lead_doc.get('original_data', {}).get('Opportunity Title', 'Unknown')}")
+
+        # Create manually uploaded documents array if it doesn't exist
+        if 'manually_uploaded_documents' not in lead_doc:
+            lead_doc['manually_uploaded_documents'] = []
+
+        # Add the new document
+        new_document = {
+            "document_type": document_type,
+            "filename": document_filename,
+            "uploaded_at": datetime.utcnow().isoformat(),
+            "page_analyses": page_analyses,
+            "processing_metadata": processing_metadata,
+            "total_pages": processing_metadata.get('total_pages', len(page_analyses))
+        }
+
+        lead_doc['manually_uploaded_documents'].append(new_document)
+        lead_doc['last_manual_upload'] = datetime.utcnow().isoformat()
+
+        logger.info(f"  📄 Added document with {new_document['total_pages']} pages")
+
+        # Update Cosmos DB
+        cosmos_manager.container.upsert_item(lead_doc)
+        result['lead_updated'] = True
+        logger.info(f"  ✅ Lead document updated in Cosmos DB")
+
+        # Re-run structured extraction with the new document content
+        logger.info(f"  🔍 Re-extracting structured data with new document...")
+        lead_doc = extract_structured_from_lead_with_manual_docs(lead_doc, force_reextract=True)
+
+        # Update document analysis to reflect new documents
+        doc_analysis = lead_doc.get('document_analysis', {})
+
+        # Remove this document from missing list if it was there
+        critical_missing = doc_analysis.get('critical_missing_documents', [])
+        updated_missing = []
+
+        for missing_doc in critical_missing:
+            # If the uploaded doc type matches a missing doc, remove it
+            if not any(keyword in document_type.lower() or keyword in missing_doc.lower()
+                      for keyword in [document_type.lower(), missing_doc.lower()]):
+                updated_missing.append(missing_doc)
+
+        doc_analysis['critical_missing_documents'] = updated_missing
+        doc_analysis['last_updated'] = datetime.utcnow().isoformat()
+        doc_analysis['manually_uploaded_count'] = len(lead_doc['manually_uploaded_documents'])
+
+        # Update documents_present list
+        documents_present = doc_analysis.get('documents_present', [])
+
+        # Add the new document to present list
+        documents_present.append({
+            "source": "manual_upload",
+            "filename": document_filename,
+            "type": document_type,
+            "pages": processing_metadata.get('total_pages', len(page_analyses)),
+            "uploaded_at": datetime.utcnow().isoformat()
+        })
+
+        doc_analysis['documents_present'] = documents_present
+        doc_analysis['total_documents_available'] = len(documents_present)
+
+        # Re-assess if we can build a proposal now
+        if len(updated_missing) == 0 or len(updated_missing) < len(critical_missing):
+            # Fewer docs missing - reassess
+            assessment_prompt = f"""Based on the documents now available for this opportunity, can a proposal be built?
+
+Original Opportunity Type: {doc_analysis.get('opportunity_type', 'unknown')}
+Documents Originally Missing: {', '.join(critical_missing)}
+Documents Now Uploaded: {document_filename} ({document_type})
+Documents Still Missing: {', '.join(updated_missing) if updated_missing else 'None'}
+
+Respond with JSON: {{"can_build_proposal": true/false, "reasoning": "explanation"}}"""
+
+            try:
+                assessment_response = st.session_state.gpt41_client.chat.completions.create(
+                    model=st.session_state.GPT41_DEPLOYMENT,
+                    messages=[
+                        {"role": "system", "content": "You are an expert at assessing government contracting opportunities. Respond with valid JSON."},
+                        {"role": "user", "content": assessment_prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+
+                assessment = json.loads(assessment_response.choices[0].message.content)
+                doc_analysis['can_build_proposal'] = assessment.get('can_build_proposal', False)
+                doc_analysis['reassessment_reasoning'] = assessment.get('reasoning', '')
+
+                logger.info(f"  📊 Proposal assessment: {doc_analysis['can_build_proposal']}")
+
+            except Exception as e:
+                logger.error(f"  ❌ Failed to reassess proposal readiness: {e}")
+
+        lead_doc['document_analysis'] = doc_analysis
+
+        # Final update
+        cosmos_manager.container.upsert_item(lead_doc)
+        result['extraction_run'] = True
+        result['status'] = 'success'
+        result['message'] = f"Successfully attached '{document_filename}' to lead. {len(updated_missing)} critical document(s) still missing."
+
+        logger.info(f"✅ Document append complete")
+        logger.info(f"   - Documents available: {doc_analysis.get('total_documents_available', 0)}")
+        logger.info(f"   - Can build proposal: {doc_analysis.get('can_build_proposal', False)}")
+        logger.info(f"   - Still missing: {len(updated_missing)} document(s)")
+
+    except exceptions.CosmosResourceNotFoundError:
+        result['status'] = 'failed'
+        result['message'] = f"Lead with ID '{lead_id}' not found in database"
+        logger.error(f"❌ Lead not found: {lead_id}")
+    except Exception as e:
+        result['status'] = 'failed'
+        result['message'] = f"Error appending document: {str(e)}"
+        logger.error(f"❌ Failed to append document: {e}")
+
+    return result
+
+
+def extract_structured_from_lead_with_manual_docs(
+    lead_doc: Dict[str, Any],
+    force_reextract: bool = False
+) -> Dict[str, Any]:
+    """
+    Enhanced version of extract_structured_from_lead that includes manually uploaded documents.
+    Combines scraped URLs + manually uploaded PDFs for comprehensive extraction.
+    """
+    from datetime import datetime
+
+    logger.info(f"🔍 Extracting structured data (including manual uploads) for lead: {lead_doc['id']}")
+
+    # Get all sources of information
+    scraped_urls = lead_doc.get('scraped_urls', [])
+    manual_docs = lead_doc.get('manually_uploaded_documents', [])
+
+    if not scraped_urls and not manual_docs:
+        logger.warning(f"  ⚠️  No data sources found (no scraped URLs or manual uploads)")
+        return lead_doc
+
+    # For each scraped URL, extract structured data (same as before)
+    for idx, scraped_url in enumerate(scraped_urls):
+        existing_structured = scraped_url.get('structured_data', {})
+        if existing_structured and not force_reextract:
+            continue
+
+        extracted_text = scraped_url.get('extracted_text', '')
+
+        # Gather all PDF content (from URL attachments)
+        pdf_content = ""
+        pdf_attachments = scraped_url.get('pdf_attachments', [])
+        for pdf_data in pdf_attachments:
+            if pdf_data.get('status') == 'success':
+                page_analyses = pdf_data.get('page_analyses', [])
+                for page_analysis in page_analyses:
+                    page_text = page_analysis.get('full_text_content', '')
+                    if page_text:
+                        pdf_content += f"\n{page_text}\n"
+
+        # Add manually uploaded documents content
+        manual_content = ""
+        if manual_docs:
+            for manual_doc in manual_docs:
+                manual_content += f"\n\n{'='*80}\nMANUALLY UPLOADED DOCUMENT: {manual_doc.get('filename', 'Unknown')} ({manual_doc.get('document_type', 'Unknown')})\n{'='*80}\n\n"
+                page_analyses = manual_doc.get('page_analyses', [])
+                for page_num, page_analysis in enumerate(page_analyses):
+                    page_text = page_analysis.get('full_text_content', '')
+                    if page_text:
+                        manual_content += f"\n[Page {page_num + 1}]\n{page_text}\n"
+
+        # Combine all content
+        combined_text = extracted_text
+        if pdf_content:
+            combined_text += f"\n\n{'='*80}\nPDF ATTACHMENTS FROM WEB SCRAPING:\n{'='*80}\n{pdf_content}"
+        if manual_content:
+            combined_text += manual_content
+
+        if len(combined_text) < 100:
+            logger.warning(f"  ⚠️  Insufficient combined text for extraction")
+            continue
+
+        # Same extraction logic as extract_structured_from_lead
+        logger.info(f"  📊 Extracting from combined content ({len(combined_text)} chars)...")
+
+        # Get extraction schema (same as in original function)
+        extraction_schema = {
+            "opportunity_identification": {"notice_id": "string or null", "title": "string or null", "type": "string or null", "status": "string or null", "contract_line_item_number": "string or null"},
+            "organization": {"department": "string or null", "sub_tier": "string or null", "major_command": "string or null", "sub_command": "string or null", "office": "string or null", "contracting_office_address": {"street": "string or null", "city": "string or null", "state": "string or null", "zip": "string or null"}},
+            "classification": {"product_service_code": "string or null", "naics_code": "string or null", "set_aside": "string or null", "initiative": "string or null"},
+            "timeline": {"published_date": "string or null", "response_deadline": "string or null", "inactive_date": "string or null", "contract_award_date": "string or null", "suggested_submission_dates": [], "award_duration_months": "number or null", "period_of_performance": "string or null"},
+            "financial": {"total_program_funding": "number or null", "contract_award_value": "number or null", "individual_award_range": {"min": "number or null", "max": "number or null"}, "anticipated_awards": "string or null", "funding_type": "string or null"},
+            "project_details": {"summary": "string or null", "full_description": "string or null", "technical_objectives": [], "scope_of_work": "string or null", "deliverables": [], "collaboration_requirements": "string or null"},
+            "requirements": {"technical": [], "business": [], "security_clearance": "string or null", "certifications": [], "capabilities": []},
+            "contacts": [],
+            "place_of_performance": {"location": "string or null", "remote_allowed": "boolean or null"},
+            "contractor_awarded": {"name": "string or null", "unique_entity_id": "string or null", "address": "string or null"},
+            "attachments": [],
+            "provisions_and_clauses": [],
+            "amendments": [],
+            "additional_information": {"submission_format": "string or null", "evaluation_criteria": [], "award_type": "string or null", "special_instructions": "string or null"}
+        }
+
+        try:
+            extraction_prompt = f"""You are an expert at extracting structured information from government contract opportunities.
+
+SCRAPED WEB PAGE + PDF ATTACHMENTS + MANUALLY UPLOADED DOCUMENTS:
+{combined_text[:50000]}
+
+Extract ALL relevant information into the comprehensive JSON schema. Pay special attention to manually uploaded documents as they often contain the most critical information (RFP, PWS, SOW, etc.).
+
+JSON Schema:
+{json.dumps(extraction_schema, indent=2)}
+
+Respond with ONLY the populated JSON object."""
+
+            extraction_response = st.session_state.gpt41_client.chat.completions.create(
+                model=st.session_state.GPT41_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": "You are an expert data extraction assistant. Always respond with valid, comprehensive JSON."},
+                    {"role": "user", "content": extraction_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+
+            structured_data = json.loads(extraction_response.choices[0].message.content)
+            scraped_url['structured_data'] = structured_data
+            scraped_url['structured_data_extracted_at'] = datetime.utcnow().isoformat()
+
+            logger.info(f"  ✅ Extraction complete with manual documents included")
+
+        except Exception as e:
+            logger.error(f"  ❌ Extraction failed: {e}")
+            scraped_url['structured_data'] = {}
+            scraped_url['extraction_error'] = str(e)
+
+    lead_doc['last_extraction_run'] = datetime.utcnow().isoformat()
+    lead_doc['extraction_complete'] = True
+
+    return lead_doc
+
+
+def discover_and_download_solicitation_documents(
+    lead_doc: Dict[str, Any],
+    progress_bar=None,
+    progress_context: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    Agent-based document discovery system that:
+    1. Analyzes the opportunity to identify required documents (RFP, PWS, Q&A, amendments)
+    2. Searches for related solicitations
+    3. Downloads all critical documents
+    4. Marks what's missing
+
+    Returns: {
+        "documents_discovered": int,
+        "documents_downloaded": int,
+        "critical_documents_missing": List[str],
+        "related_notices_checked": List[str],
+        "document_analyses": List[Dict]
+    }
+    """
+    from datetime import datetime
+    import json
+
+    logger.info(f"🔍 Discovering solicitation documents for lead: {lead_doc['id']}")
+
+    result = {
+        "documents_discovered": 0,
+        "documents_downloaded": 0,
+        "critical_documents_missing": [],
+        "related_notices_checked": [],
+        "document_analyses": []
+    }
+
+    # Get progress context
+    ctx = progress_context or {}
+    sheet_name = ctx.get('sheet_name', 'Unknown')
+    row_num = ctx.get('row_idx', 0) + 1
+
+    # Step 1: Use AI to analyze what documents SHOULD exist
+    scraped_urls = lead_doc.get('scraped_urls', [])
+    if not scraped_urls:
+        logger.warning("  ⚠️  No scraped URLs to analyze")
+        return result
+
+    # Get structured data and extracted text
+    primary_url = scraped_urls[0]
+    structured_data = primary_url.get('structured_data', {})
+    extracted_text = primary_url.get('extracted_text', '')
+
+    if progress_bar:
+        progress_bar.progress(
+            (ctx.get('sheet_idx', 0) + row_num / ctx.get('total_rows', 1)) / ctx.get('total_sheets', 1),
+            text=f"🔎 Sheet '{sheet_name}' Row {row_num} - Analyzing document requirements..."
+        )
+
+    # Use GPT-4.1 to analyze document status
+    analysis_prompt = f"""You are an expert at analyzing government contract opportunities and identifying required documents.
+
+OPPORTUNITY DATA:
+Notice ID: {structured_data.get('opportunity_identification', {}).get('notice_id', 'Unknown')}
+Type: {structured_data.get('opportunity_identification', {}).get('type', 'Unknown')}
+Title: {structured_data.get('opportunity_identification', {}).get('title', 'Unknown')}
+
+EXTRACTED TEXT:
+{extracted_text[:5000]}
+
+STRUCTURED DATA:
+{json.dumps(structured_data, indent=2)[:3000]}
+
+Analyze this opportunity and provide:
+1. **opportunity_type**: Is this a "presolicitation", "full_solicitation", "award", "sources_sought", or "amendment"?
+2. **expected_documents**: List ALL documents that SHOULD exist for a complete opportunity of this type (e.g., RFP, PWS, Statement of Work, Q&A, Amendments, Wage Determination, etc.)
+3. **documents_mentioned_in_text**: List any documents explicitly mentioned in the text (with their names/references)
+4. **related_notice_ids**: Extract any related solicitation/notice IDs mentioned (e.g., "W911S7-25-R-A015" or "FLW012699")
+5. **estimated_release_date**: If documents aren't available yet, when are they expected? (extract from text)
+6. **critical_missing_documents**: Based on opportunity_type, what critical documents are missing?
+7. **can_build_proposal**: Boolean - can someone build a proposal with the current information, or are critical documents missing?
+8. **next_steps_for_user**: What should the user do next? (e.g., "Check back after Oct 15 for RFP", "Download PWS to understand requirements")
+
+Respond with ONLY a JSON object with these keys."""
+
+    try:
+        analysis_response = st.session_state.gpt41_client.chat.completions.create(
+            model=st.session_state.GPT41_DEPLOYMENT,
+            messages=[
+                {"role": "system", "content": "You are an expert at analyzing government contracting opportunities and identifying required documents. Always respond with valid JSON."},
+                {"role": "user", "content": analysis_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+
+        document_analysis = json.loads(analysis_response.choices[0].message.content)
+        logger.info(f"  ✅ Document analysis complete")
+        logger.info(f"     Opportunity Type: {document_analysis.get('opportunity_type', 'unknown')}")
+        logger.info(f"     Can Build Proposal: {document_analysis.get('can_build_proposal', False)}")
+
+    except Exception as e:
+        logger.error(f"  ❌ Failed to analyze document requirements: {e}")
+        document_analysis = {
+            "opportunity_type": "unknown",
+            "expected_documents": [],
+            "documents_mentioned_in_text": [],
+            "related_notice_ids": [],
+            "critical_missing_documents": [],
+            "can_build_proposal": False,
+            "next_steps_for_user": "Unable to analyze document requirements"
+        }
+
+    # Step 2: Check for related notices and fetch them
+    related_notice_ids = document_analysis.get('related_notice_ids', [])
+
+    # Also check structured data for related notice
+    primary_url_data = scraped_urls[0] if scraped_urls else {}
+    if 'Related Notice' in str(structured_data):
+        # Look through all fields for "Related Notice"
+        for key, value in structured_data.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if 'related' in str(sub_key).lower() and sub_value:
+                        if sub_value not in related_notice_ids:
+                            related_notice_ids.append(sub_value)
+
+    # Also extract from raw text
+    import re
+    notice_pattern = r'Related Notice[:\s]+([A-Z0-9]+)'
+    matches = re.findall(notice_pattern, extracted_text)
+    for match in matches:
+        if match not in related_notice_ids:
+            related_notice_ids.append(match)
+
+    # Extract solicitation numbers mentioned
+    solicitation_pattern = r'Solicitation Number[:\s]+([A-Z0-9-]+)'
+    solicitation_matches = re.findall(solicitation_pattern, extracted_text)
+    for match in solicitation_matches:
+        if match not in related_notice_ids:
+            related_notice_ids.append(match)
+
+    logger.info(f"  🔗 Found {len(related_notice_ids)} related notice(s): {related_notice_ids}")
+
+    # Step 3: Fetch and scrape related notices
+    for notice_id in related_notice_ids:
+        if progress_bar:
+            progress_bar.progress(
+                (ctx.get('sheet_idx', 0) + row_num / ctx.get('total_rows', 1)) / ctx.get('total_sheets', 1),
+                text=f"🔗 Sheet '{sheet_name}' Row {row_num} - Checking related notice: {notice_id}..."
+            )
+
+        logger.info(f"  🔗 Fetching related notice: {notice_id}")
+        result['related_notices_checked'].append(notice_id)
+
+        # Try to construct SAM.gov URL for related notice
+        # SAM.gov search URL format
+        search_url = f"https://sam.gov/opp/{notice_id}/view"
+
+        try:
+            # Scrape the related notice
+            related_scraped = scrape_and_enrich_url(search_url, {})
+
+            if related_scraped['status'] == 'success':
+                logger.info(f"  ✅ Successfully scraped related notice: {notice_id}")
+
+                # Process any PDF attachments from related notice
+                pdf_attachments = related_scraped.get('pdf_attachments', [])
+                logger.info(f"  📎 Found {len(pdf_attachments)} attachment(s) in related notice")
+
+                for pdf_info in pdf_attachments:
+                    pdf_url = pdf_info.get('url')
+                    pdf_filename = pdf_info.get('file_name', 'attachment.pdf')
+
+                    if pdf_url:
+                        logger.info(f"  📥 Downloading: {pdf_filename}")
+                        pdf_result = download_and_process_pdf_attachment(pdf_url, pdf_filename)
+
+                        if pdf_result['status'] == 'success':
+                            result['documents_downloaded'] += 1
+                            result['document_analyses'].append(pdf_result)
+                            logger.info(f"  ✅ Downloaded and processed: {pdf_filename}")
+
+                        time.sleep(1)  # Rate limiting
+
+                # Add related notice scrape to lead document
+                related_entry = {
+                    "notice_id": notice_id,
+                    "url": search_url,
+                    "scraped_at": related_scraped['scraped_at'],
+                    "status": related_scraped['status'],
+                    "extracted_text": related_scraped.get('extracted_text', ''),
+                    "pdf_attachments": result['document_analyses'][-len(pdf_attachments):] if pdf_attachments else []
+                }
+
+                # Add to lead document
+                if 'related_notices' not in lead_doc:
+                    lead_doc['related_notices'] = []
+                lead_doc['related_notices'].append(related_entry)
+
+                result['documents_discovered'] += 1
+
+        except Exception as e:
+            logger.error(f"  ❌ Failed to fetch related notice {notice_id}: {e}")
+
+    # Step 4: Inventory all documents currently available
+    documents_present = []
+
+    # From scraped URLs - PDF attachments
+    for scraped_url in scraped_urls:
+        pdf_attachments = scraped_url.get('pdf_attachments', [])
+        for pdf in pdf_attachments:
+            if pdf.get('status') == 'success':
+                documents_present.append({
+                    "source": "scraped_attachment",
+                    "filename": pdf.get('file_name', 'Unknown'),
+                    "type": "PDF",
+                    "pages": pdf.get('processing_metadata', {}).get('total_pages', 0),
+                    "downloaded_at": pdf.get('scraped_at', 'Unknown')
+                })
+
+    # From manually uploaded documents
+    manual_docs = lead_doc.get('manually_uploaded_documents', [])
+    for manual_doc in manual_docs:
+        documents_present.append({
+            "source": "manual_upload",
+            "filename": manual_doc.get('filename', 'Unknown'),
+            "type": manual_doc.get('document_type', 'Unknown'),
+            "pages": manual_doc.get('total_pages', 0),
+            "uploaded_at": manual_doc.get('uploaded_at', 'Unknown')
+        })
+
+    # From related notices
+    related_notices = lead_doc.get('related_notices', [])
+    for notice in related_notices:
+        notice_pdfs = notice.get('pdf_attachments', [])
+        for pdf in notice_pdfs:
+            if pdf.get('status') == 'success':
+                documents_present.append({
+                    "source": f"related_notice_{notice.get('notice_id', 'Unknown')}",
+                    "filename": pdf.get('file_name', 'Unknown'),
+                    "type": "PDF",
+                    "pages": pdf.get('processing_metadata', {}).get('total_pages', 0),
+                    "downloaded_at": pdf.get('uploaded_at', 'Unknown')
+                })
+
+    # Step 5: Add document completeness metadata to lead
+    lead_doc['document_analysis'] = {
+        "analyzed_at": datetime.utcnow().isoformat(),
+        "opportunity_type": document_analysis.get('opportunity_type'),
+        "can_build_proposal": document_analysis.get('can_build_proposal', False),
+        "expected_documents": document_analysis.get('expected_documents', []),
+        "documents_mentioned": document_analysis.get('documents_mentioned_in_text', []),
+        "documents_present": documents_present,  # NEW: What we have
+        "total_documents_available": len(documents_present),  # NEW: Count
+        "critical_missing_documents": document_analysis.get('critical_missing_documents', []),
+        "estimated_release_date": document_analysis.get('estimated_release_date'),
+        "next_steps_for_user": document_analysis.get('next_steps_for_user', ''),
+        "documents_discovered": result['documents_discovered'],
+        "documents_downloaded": result['documents_downloaded'],
+        "related_notices_checked": result['related_notices_checked']
+    }
+
+    result['critical_documents_missing'] = document_analysis.get('critical_missing_documents', [])
+
+    logger.info(f"✅ Document discovery complete:")
+    logger.info(f"   - Available: {len(documents_present)} document(s)")
+    logger.info(f"   - Discovered: {result['documents_discovered']} document(s)")
+    logger.info(f"   - Downloaded: {result['documents_downloaded']} document(s)")
+    logger.info(f"   - Missing: {len(result['critical_documents_missing'])} critical document(s)")
+
+    return result
+
+
+def extract_structured_from_lead(
+    lead_doc: Dict[str, Any],
+    force_reextract: bool = False
+) -> Dict[str, Any]:
+    """
+    Takes a lead document with scraped_urls[].extracted_text and extracts comprehensive structured data.
+    Can be run independently to re-process existing leads or fill in null fields.
+
+    Args:
+        lead_doc: Lead document from Cosmos DB
+        force_reextract: If True, re-extracts even if structured_data already exists
+
+    Returns: Updated lead_doc with populated structured_data
+    """
+    from datetime import datetime
+
+    logger.info(f"🔍 Extracting structured data from lead: {lead_doc['id']}")
+
+    # Check if we already have structured data and if we should skip
+    scraped_urls = lead_doc.get('scraped_urls', [])
+    if not scraped_urls:
+        logger.warning(f"  ⚠️  No scraped URLs found in lead document")
+        return lead_doc
+
+    # Comprehensive extraction schema
+    extraction_schema = {
+        "opportunity_identification": {
+            "notice_id": "string or null",
+            "title": "string or null",
+            "type": "string or null",
+            "status": "string or null",
+            "contract_line_item_number": "string or null"
+        },
+        "organization": {
+            "department": "string or null",
+            "sub_tier": "string or null",
+            "major_command": "string or null",
+            "sub_command": "string or null",
+            "office": "string or null",
+            "contracting_office_address": {
+                "street": "string or null",
+                "city": "string or null",
+                "state": "string or null",
+                "zip": "string or null"
+            }
+        },
+        "classification": {
+            "product_service_code": "string or null",
+            "naics_code": "string or null",
+            "set_aside": "string or null",
+            "initiative": "string or null"
+        },
+        "timeline": {
+            "published_date": "string or null",
+            "response_deadline": "string or null",
+            "inactive_date": "string or null",
+            "contract_award_date": "string or null",
+            "suggested_submission_dates": [],
+            "award_duration_months": "number or null",
+            "period_of_performance": "string or null"
+        },
+        "financial": {
+            "total_program_funding": "number or null",
+            "contract_award_value": "number or null",
+            "individual_award_range": {
+                "min": "number or null",
+                "max": "number or null"
+            },
+            "anticipated_awards": "string or null",
+            "funding_type": "string or null"
+        },
+        "project_details": {
+            "summary": "string or null",
+            "full_description": "string or null",
+            "technical_objectives": [],
+            "scope_of_work": "string or null",
+            "deliverables": [],
+            "collaboration_requirements": "string or null"
+        },
+        "requirements": {
+            "technical": [],
+            "business": [],
+            "security_clearance": "string or null",
+            "certifications": [],
+            "capabilities": []
+        },
+        "contacts": [],
+        "place_of_performance": {
+            "location": "string or null",
+            "remote_allowed": "boolean or null"
+        },
+        "contractor_awarded": {
+            "name": "string or null",
+            "unique_entity_id": "string or null",
+            "address": "string or null"
+        },
+        "attachments": [],
+        "provisions_and_clauses": [],
+        "amendments": [],
+        "additional_information": {
+            "submission_format": "string or null",
+            "evaluation_criteria": [],
+            "award_type": "string or null",
+            "special_instructions": "string or null"
+        }
+    }
+
+    # For each scraped URL, check if we need to extract/re-extract
+    for idx, scraped_url in enumerate(scraped_urls):
+        existing_structured = scraped_url.get('structured_data', {})
+
+        # Skip if already has data and not forcing re-extract
+        if existing_structured and not force_reextract:
+            logger.info(f"  ⏭️  Skipping URL {idx+1}/{len(scraped_urls)} - already has structured data")
+            continue
+
+        extracted_text = scraped_url.get('extracted_text', '')
+        if not extracted_text or len(extracted_text) < 100:
+            logger.warning(f"  ⚠️  URL {idx+1}/{len(scraped_urls)} has insufficient extracted text")
+            continue
+
+        logger.info(f"  📊 Extracting structured data from URL {idx+1}/{len(scraped_urls)}: {scraped_url.get('url', 'unknown')[:60]}...")
+
+        try:
+            # Merge existing data for context
+            context_data = {
+                "original_lead_data": lead_doc.get('original_data', {}),
+                "existing_structured_data": existing_structured
+            }
+
+            # Gather PDF attachment content if available
+            pdf_content = ""
+            pdf_attachments = scraped_url.get('pdf_attachments', [])
+            if pdf_attachments:
+                logger.info(f"  📎 Including content from {len(pdf_attachments)} PDF attachment(s)")
+                for pdf_idx, pdf_data in enumerate(pdf_attachments):
+                    if pdf_data.get('status') == 'success':
+                        pdf_content += f"\n\n--- PDF ATTACHMENT {pdf_idx + 1}: {pdf_data.get('file_name', 'Unknown')} ---\n\n"
+                        # Extract text from all PDF pages
+                        page_analyses = pdf_data.get('page_analyses', [])
+                        for page_num, page_analysis in enumerate(page_analyses):
+                            page_text = page_analysis.get('full_text_content', '')
+                            if page_text:
+                                pdf_content += f"\n[Page {page_num + 1}]\n{page_text}\n"
+
+            # Combine scraped text and PDF content (limit to 50k chars total)
+            combined_text = extracted_text
+            if pdf_content:
+                combined_text += f"\n\n{'='*80}\nPDF ATTACHMENTS CONTENT:\n{'='*80}\n{pdf_content}"
+
+            extraction_prompt = f"""You are an expert at extracting structured information from government contract opportunities, awards, RFPs, BAAs, and solicitations.
+
+CONTEXT - Original Lead Information:
+{json.dumps(context_data, indent=2)}
+
+SCRAPED TEXT TO ANALYZE (includes web page + PDF attachments):
+{combined_text[:50000]}
+
+Extract ALL relevant information and populate the JSON schema below.
+
+IMPORTANT INSTRUCTIONS:
+1. Extract as much detail as possible from the scraped text
+2. If existing_structured_data has values but they're missing from the text, KEEP the existing values
+3. If the text has new/better information than existing data, USE the new information
+4. Use null for fields where information is truly not available
+5. For dates, convert to ISO 8601 format (YYYY-MM-DD) when possible
+6. For monetary values, extract numbers only (no currency symbols, no commas)
+7. Be thorough - this is for lead qualification and business decisions
+8. Extract contact information carefully (names, emails, phone numbers)
+9. Identify all attachments/documents mentioned
+10. Note any amendments or modifications
+
+JSON Schema to populate:
+{json.dumps(extraction_schema, indent=2)}
+
+Respond with ONLY the populated JSON object."""
+
+            extraction_response = st.session_state.gpt41_client.chat.completions.create(
+                model=st.session_state.GPT41_DEPLOYMENT,
+                messages=[
+                    {"role": "system", "content": "You are an expert data extraction assistant specializing in government contracting opportunities. Always respond with valid, comprehensive JSON."},
+                    {"role": "user", "content": extraction_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+
+            structured_data = json.loads(extraction_response.choices[0].message.content)
+
+            # Update the scraped_url entry with extracted data
+            scraped_url['structured_data'] = structured_data
+            scraped_url['structured_data_extracted_at'] = datetime.utcnow().isoformat()
+
+            logger.info(f"  ✅ Extracted {len(structured_data)} top-level fields")
+
+        except Exception as e:
+            logger.error(f"  ❌ Failed to extract structured data: {e}")
+            scraped_url['structured_data'] = {}
+            scraped_url['extraction_error'] = str(e)
+
+    # Update lead document metadata
+    lead_doc['last_extraction_run'] = datetime.utcnow().isoformat()
+    lead_doc['extraction_complete'] = all(
+        url.get('structured_data') for url in scraped_urls
+    )
+
+    logger.info(f"✅ Structured extraction complete for lead {lead_doc['id']}")
+    return lead_doc
+
+
+def enrich_lead_incrementally(
+    cosmos_manager,
+    lead_doc_id: str,
+    detected_urls: List[Tuple[str, str]],
+    row_dict: Dict[str, Any],
+    filename: str,
+    progress_bar=None,
+    progress_context: Dict[str, Any] = None
+) -> Dict[str, Any]:
+    """
+    Incrementally scrape URLs and store ALL data in the single lead document.
+    Updates Cosmos DB after EACH scrape for resume capability.
+    If document approaches 2MB limit, provides warning but stores what it can.
+
+    Args:
+        progress_bar: Streamlit progress bar to update during processing
+        progress_context: Dict with sheet_idx, total_sheets, row_idx, total_rows, sheet_name
+
+    Returns: Summary of enrichment
+    """
+    from datetime import datetime
+    import pandas as pd
+    import hashlib
+
+    # Create/update lead document
+    try:
+        lead_doc = cosmos_manager.container.read_item(item=lead_doc_id, partition_key=lead_doc_id)
+        logger.info(f"Found existing lead document: {lead_doc_id}")
+    except exceptions.CosmosResourceNotFoundError:
+        # Clean original_data (remove nulls but keep all content)
+        sanitized_row_dict = {}
+        for key, value in row_dict.items():
+            if value is not None and not pd.isna(value):
+                sanitized_row_dict[key] = str(value)
+
+        lead_doc = {
+            "id": lead_doc_id,
+            "doc_type": "lead",
+            "source_file": filename,
+            "original_data": sanitized_row_dict,
+            "ingested_at": datetime.utcnow().isoformat(),
+            "detected_urls": [{"field": field, "url": url} for field, url in detected_urls],
+            "scraped_urls": [],  # List of all scraped URL data (full content here)
+            "scrape_history": {},  # Maps url -> {status, scraped_at} for resume capability
+            "enrichment_status": "in_progress"
+        }
+
+        try:
+            cosmos_manager.container.upsert_item(lead_doc)
+            logger.info(f"Created new lead document: {lead_doc_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to create lead document: {e}")
+            raise
+
+    scrape_history = lead_doc.get("scrape_history", {})
+    scraped_urls = lead_doc.get("scraped_urls", [])
+    urls_scraped = 0
+    urls_skipped = 0
+    urls_failed = 0
+
+    # Get progress context for display
+    ctx = progress_context or {}
+    sheet_name = ctx.get('sheet_name', 'Unknown')
+    row_num = ctx.get('row_idx', 0) + 1
+    total_rows = ctx.get('total_rows', 1)
+    sheet_idx = ctx.get('sheet_idx', 0)
+    total_sheets = ctx.get('total_sheets', 1)
+
+    for url_idx, (field_name, url) in enumerate(detected_urls):
+        # Update progress bar with detailed URL-level progress
+        if progress_bar:
+            base_progress = (sheet_idx + row_num / total_rows) / total_sheets
+            url_progress = (url_idx / len(detected_urls)) * (1.0 / total_rows / total_sheets)
+            progress_bar.progress(
+                base_progress + url_progress,
+                text=f"🌐 Sheet '{sheet_name}' Row {row_num}/{total_rows} - Scraping URL {url_idx + 1}/{len(detected_urls)}: {field_name}"
+            )
+
+        # Check if already successfully scraped
+        if url in scrape_history and scrape_history[url].get("status") == "success":
+            logger.info(f"  ⏭️  Skipping already-scraped URL: {url}")
+            urls_skipped += 1
+            continue
+
+        logger.info(f"  🔍 Scraping {field_name}: {url}")
+
+        # Scrape the URL
+        scraped = scrape_and_enrich_url(url, row_dict)
+
+        # Process PDF attachments if found
+        pdf_analyses = []
+        pdf_attachments = scraped.get('pdf_attachments', [])
+        if pdf_attachments:
+            logger.info(f"  📎 Processing {len(pdf_attachments)} PDF attachment(s)...")
+            if progress_bar:
+                progress_bar.progress(
+                    base_progress + url_progress,
+                    text=f"📎 Sheet '{sheet_name}' Row {row_num}/{total_rows} - Processing {len(pdf_attachments)} PDF attachment(s)..."
+                )
+
+            for pdf_info in pdf_attachments:
+                pdf_url = pdf_info.get('url')
+                pdf_filename = pdf_info.get('file_name', 'attachment.pdf')
+
+                if pdf_url:
+                    pdf_result = download_and_process_pdf_attachment(pdf_url, pdf_filename)
+                    pdf_analyses.append(pdf_result)
+
+                    # Rate limiting between PDF downloads
+                    time.sleep(1)
+
+        # Add to scraped_urls array (all data in one document)
+        scraped_url_entry = {
+            "source_field": field_name,
+            "url": url,
+            "scraped_at": scraped['scraped_at'],
+            "status": scraped['status'],
+            "scrape_method": scraped.get('scrape_method'),
+            "scrape_attempts": scraped.get('scrape_attempts', []),
+            "page_title": scraped.get('page_title'),
+            "extracted_text": scraped.get('extracted_text', ''),
+            "structured_data": scraped.get('structured_data', {}),
+            "pdf_attachments": pdf_analyses,  # Full PDF vision analyses
+            "error": scraped.get('error')
+        }
+        scraped_urls.append(scraped_url_entry)
+
+        # Update scrape_history for resume capability
+        scrape_history[url] = {
+            "status": scraped['status'],
+            "scraped_at": scraped['scraped_at'],
+            "error": scraped.get('error', None)
+        }
+
+        if scraped['status'] == 'success':
+            urls_scraped += 1
+        else:
+            urls_failed += 1
+
+        # Update lead document with all scraped data
+        lead_doc['scraped_urls'] = scraped_urls
+        lead_doc['scrape_history'] = scrape_history
+        lead_doc['enrichment_status'] = 'in_progress'
+        lead_doc['last_updated'] = datetime.utcnow().isoformat()
+        lead_doc['total_urls_scraped'] = urls_scraped + urls_skipped
+        lead_doc['successful_scrapes'] = urls_scraped
+        lead_doc['failed_scrapes'] = urls_failed
+
+        # Try to update document
+        try:
+            # Check document size
+            import sys
+            doc_size = sys.getsizeof(json.dumps(lead_doc))
+
+            if doc_size > 1_900_000:  # Approaching 2MB limit
+                logger.warning(f"  ⚠️  Document size {doc_size:,} bytes approaching Cosmos DB 2MB limit")
+                logger.warning(f"  ⚠️  Consider using shorter extracted_text or fewer URLs per lead")
+
+            cosmos_manager.container.upsert_item(lead_doc)
+            logger.info(f"  ✅ Updated lead document after scraping {url}")
+
+        except exceptions.CosmosHttpResponseError as e:
+            if "Request Entity Too Large" in str(e) or "413" in str(e):
+                logger.error(f"  ❌ Document too large (>2MB). Cosmos DB hard limit reached.")
+                logger.error(f"  💡 Last {urls_failed + urls_scraped} scrapes stored. Consider processing fewer URLs per batch.")
+                # Remove the last entry that caused the overflow
+                scraped_urls.pop()
+                scrape_history[url] = {
+                    "status": "failed",
+                    "scraped_at": datetime.utcnow().isoformat(),
+                    "error": "Document size limit exceeded"
+                }
+                lead_doc['scraped_urls'] = scraped_urls
+                lead_doc['scrape_history'] = scrape_history
+                # Try one more time without the oversized entry
+                try:
+                    cosmos_manager.container.upsert_item(lead_doc)
+                    logger.info(f"  ✅ Saved lead document without oversized entry")
+                except Exception as e2:
+                    logger.error(f"  ❌ Still failed to save: {e2}")
+                break  # Stop processing more URLs for this lead
+            else:
+                logger.error(f"  ❌ Failed to update Cosmos DB: {e}")
+        except Exception as e:
+            logger.error(f"  ❌ Unexpected error updating Cosmos DB: {e}")
+
+        # Rate limiting
+        time.sleep(2)
+
+    # Mark scraping as completed
+    lead_doc['enrichment_status'] = 'scraping_completed'
+    lead_doc['enriched_at'] = datetime.utcnow().isoformat()
+
+    try:
+        cosmos_manager.container.upsert_item(lead_doc)
+        logger.info(f"✅ Lead scraping completed for {lead_doc_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to mark scraping as completed: {e}")
+
+    # PHASE 2: Extract structured data from scraped text
+    if progress_bar:
+        base_progress = (sheet_idx + row_num / total_rows) / total_sheets
+        progress_bar.progress(
+            base_progress,
+            text=f"📊 Sheet '{sheet_name}' Row {row_num}/{total_rows} - Extracting structured data from {len(scraped_urls)} scraped URL(s)..."
+        )
+
+    logger.info(f"📊 Starting structured data extraction for {lead_doc_id}")
+    lead_doc = extract_structured_from_lead(lead_doc, force_reextract=False)
+
+    # PHASE 3: Discover and download solicitation documents (RFP, PWS, etc.)
+    if progress_bar:
+        progress_bar.progress(
+            base_progress,
+            text=f"🔎 Sheet '{sheet_name}' Row {row_num}/{total_rows} - Discovering solicitation documents..."
+        )
+
+    logger.info(f"🔎 Starting document discovery for {lead_doc_id}")
+    doc_discovery_result = discover_and_download_solicitation_documents(
+        lead_doc,
+        progress_bar=progress_bar,
+        progress_context=progress_context
+    )
+
+    # Update with extraction complete
+    lead_doc['enrichment_status'] = 'completed'
+    lead_doc['extraction_completed_at'] = datetime.utcnow().isoformat()
+
+    try:
+        cosmos_manager.container.upsert_item(lead_doc)
+        logger.info(f"✅ Lead enrichment fully completed for {lead_doc_id}")
+        if doc_discovery_result['documents_downloaded'] > 0:
+            logger.info(f"   📥 Downloaded {doc_discovery_result['documents_downloaded']} solicitation document(s)")
+        if doc_discovery_result['critical_documents_missing']:
+            logger.warning(f"   ⚠️  Missing critical documents: {', '.join(doc_discovery_result['critical_documents_missing'])}")
+    except Exception as e:
+        logger.error(f"❌ Failed to save extraction results: {e}")
+
+    return {
+        'total_urls': len(detected_urls),
+        'scraped': urls_scraped,
+        'skipped': urls_skipped,
+        'failed': urls_failed
+    }
+
+
+def process_xlsx_with_agents(file_bytes: bytes, filename: str, cosmos_manager=None, parent_doc_id: str = None, enable_lead_enrichment: bool = False) -> Dict[str, Any]:
     """
     Processes XLSX file using iterative agentic analysis.
     Handles multiple sheets, analyzes each sheet structure, extracts insights.
+
+    Args:
+        enable_lead_enrichment: If True, detect and scrape URLs in each row
 
     Returns: {
         "chunks": List[str] - Text chunks for RAG
@@ -2936,7 +4667,7 @@ def process_xlsx_with_agents(file_bytes: bytes, filename: str, cosmos_manager=No
 
 Format as JSON with keys: purpose, key_data, relationships, summary"""
 
-            analysis_response = o3_client.chat.completions.create(
+            analysis_response = st.session_state.o3_client.chat.completions.create(
                 model=st.session_state.O3_DEPLOYMENT,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -3041,6 +4772,54 @@ Format as JSON with keys: purpose, key_data, relationships, summary"""
                 # This will populate structured_fields with all field/value pairs dynamically
                 row_entities = extract_row_entities(row_chunk, filename, int(row_idx) + 1)
 
+                # Lead enrichment: Detect and scrape URLs if enabled
+                # New approach: incrementally update Cosmos DB after EACH URL scrape
+                enriched_data = {}
+                if enable_lead_enrichment and cosmos_manager:
+                    row_dict = row.to_dict()
+                    detected_urls = detect_urls_in_row(row_dict)
+
+                    if detected_urls:
+                        # Generate unique lead doc ID based on filename, sheet, and row
+                        import hashlib
+                        row_identifier = f"{filename}_{sheet_name}_{int(row_idx) + 1}"
+                        lead_doc_id = f"lead_{hashlib.md5(row_identifier.encode()).hexdigest()}"
+
+                        logger.info(f"Sheet '{sheet_name}' Row {int(row_idx) + 1}: Found {len(detected_urls)} URL(s)")
+                        logger.info(f"  Lead document ID: {lead_doc_id}")
+
+                        # Show progress in UI
+                        progress_bar.progress(
+                            (idx + (row_idx + 1) / len(df)) / len(sheet_names),
+                            text=f"🔍 Enriching lead: Sheet '{sheet_name}' Row {int(row_idx) + 1}/{len(df)} ({len(detected_urls)} URL(s))..."
+                        )
+
+                        # Incrementally scrape and update Cosmos DB after each URL
+                        summary = enrich_lead_incrementally(
+                            cosmos_manager=cosmos_manager,
+                            lead_doc_id=lead_doc_id,
+                            detected_urls=detected_urls,
+                            row_dict=row_dict,
+                            filename=filename,
+                            progress_bar=progress_bar,
+                            progress_context={
+                                'sheet_name': sheet_name,
+                                'sheet_idx': idx,
+                                'total_sheets': len(sheet_names),
+                                'row_idx': row_idx,
+                                'total_rows': len(df)
+                            }
+                        )
+
+                        enriched_data['lead_doc_id'] = lead_doc_id
+                        enriched_data['enrichment_summary'] = summary
+                        enriched_data['enrichment_status'] = 'completed'
+                        logger.info(f"  ✅ Enrichment complete: {summary['scraped']} scraped, {summary['skipped']} skipped, {summary['failed']} failed")
+                    else:
+                        enriched_data['enrichment_status'] = 'no_urls_found'
+                elif enable_lead_enrichment and not cosmos_manager:
+                    logger.warning("Lead enrichment enabled but no cosmos_manager provided - skipping enrichment")
+
                 # Store row metadata for this chunk (NO DUPLICATION - data only in structured locations)
                 row_metadata = {
                     "sheet_name": sheet_name,
@@ -3062,6 +4841,10 @@ Format as JSON with keys: purpose, key_data, relationships, summary"""
                     "topics_and_keywords": row_entities.get("topics_and_keywords", {}),
                     "opportunity_details": row_entities.get("opportunity_details", {})
                 }
+
+                # Add enriched data if lead enrichment was enabled
+                if enriched_data:
+                    row_metadata['lead_enrichment'] = enriched_data
 
                 # If cosmos_manager provided, upload row immediately to save memory
                 if cosmos_manager and parent_doc_id:
@@ -3144,12 +4927,31 @@ Format as JSON with keys: purpose, key_data, relationships, summary"""
         }
 
     except Exception as e:
+        import traceback
+        full_traceback = traceback.format_exc()
+
         logger.error(f"XLSX processing failed for {filename}: {e}")
-        st.error(f"Failed to process XLSX file '{filename}': {e}")
+        logger.error(f"Full traceback:\n{full_traceback}")
+
+        # Store error in session state so it persists across reruns
+        if 'upload_error' not in st.session_state:
+            st.session_state.upload_error = []
+        st.session_state.upload_error.append({
+            'filename': filename,
+            'error': str(e),
+            'traceback': full_traceback
+        })
+
+        st.error(f"❌ Failed to process XLSX file '{filename}': {e}")
+
+        with st.expander("🔍 View full error details"):
+            st.code(full_traceback)
 
         # Check for missing dependencies
         if "openpyxl" in str(e):
             st.warning("⚠️ Missing dependency: Install openpyxl with: `pip install openpyxl`")
+        elif "playwright" in str(e).lower():
+            st.warning("⚠️ Missing dependency: Install playwright with: `pip install playwright && playwright install chromium`")
 
         # Return empty chunks to prevent error message from being ingested
         return {
@@ -3157,15 +4959,22 @@ Format as JSON with keys: purpose, key_data, relationships, summary"""
             "sheet_analyses": {},
             "metadata": {
                 "error": str(e),
+                "traceback": full_traceback,
                 "filename": filename,
                 "processing_failed": True
             }
         }
 
 
-def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
+def process_uploaded_file(uploaded_file, cosmos_manager=None, parent_doc_id=None) -> Dict[str, Any]:
     """
     Comprehensive document processing with classification, extraction, and metadata.
+
+    Args:
+        uploaded_file: Streamlit uploaded file object
+        cosmos_manager: Optional CosmosManager for incremental lead enrichment
+        parent_doc_id: Optional parent document ID
+
     Returns: {
         "chunks": List[str],
         "doc_type": str,
@@ -3212,7 +5021,15 @@ def process_uploaded_file(uploaded_file) -> Dict[str, Any]:
         processing_metadata = csv_result.get("metadata", {})
         processing_metadata["table_analysis"] = csv_result.get("table_analysis", {})
     elif file_ext == ".xlsx":
-        xlsx_result = process_xlsx_with_agents(file_bytes, filename)
+        # Check if lead enrichment is enabled in session state
+        enable_enrichment = st.session_state.get("enable_lead_enrichment", False)
+        xlsx_result = process_xlsx_with_agents(
+            file_bytes,
+            filename,
+            cosmos_manager=cosmos_manager,
+            parent_doc_id=parent_doc_id,
+            enable_lead_enrichment=enable_enrichment
+        )
         chunks = xlsx_result.get("chunks", [])
         processing_metadata = xlsx_result.get("metadata", {})
         processing_metadata["sheet_analyses"] = xlsx_result.get("sheet_analyses", {})
@@ -3902,7 +5719,7 @@ class ScratchpadManager:
         self._init_database()
 
         # Initialize pads in memory and DB
-        pad_types = ["output", "research", "tables", "plots", "outline", "data", "log"]
+        pad_types = ["output", "research", "tables", "plots", "outline", "data", "log", "format"]
         for pad_type in pad_types:
             self._ensure_pad_exists(pad_type)
 
@@ -4660,12 +6477,13 @@ AGENT_PERSONAS = {
     1.  Review the LOG scratchpad, which contains the user's goal and the history of steps taken. Use scratchpad_summary() to see all pads.
     2.  **LOOP AWARENESS**: You will be informed of your current loop number and remaining loops. Plan accordingly to finish BEFORE the final loop.
     3.  **MULTI-PAD WORKFLOW**: Direct agents to work on different scratchpads in parallel:
-        - OUTLINE pad: Initial plan and structure
+        - FORMAT pad: Submission format requirements (page limits, fonts, sections, required structure, etc.)
+        - OUTLINE pad: Initial plan and structure (MUST follow FORMAT requirements if present)
         - RESEARCH pad: Gathered facts, search results, data points
         - TABLES pad: All formatted tables
         - PLOTS pad: Plot specifications and data
         - DATA pad: Raw structured data (JSON, lists)
-        - OUTPUT pad: Final answer being assembled
+        - OUTPUT pad: Final answer being assembled (MUST follow FORMAT requirements if present)
         - LOG pad: Agent actions and decisions
     4.  **PARALLEL EXECUTION IS DEFAULT**: You MUST delegate multiple independent tasks simultaneously whenever possible:
         - Single task format: {{"agent": "AgentName", "task": "description"}} - USE ONLY when tasks are dependent
@@ -4678,7 +6496,56 @@ AGENT_PERSONAS = {
           * Multiple information needs identified → ALL should be searched in parallel
           * Report writing task → Delegate multiple parallel searches to gather ALL needed data at once
         - **FORBIDDEN**: Sequential searches when parallel searches would work. ALWAYS delegate 3+ parallel tasks for comprehensive requests.
-    5.  **STRATEGIC WORKFLOW FOR COMPREHENSIVE REPORTS**:
+    5.  **SQL QUERY TASKS - EXPLORATORY REFINEMENT WORKFLOW**:
+        ═══════════════════════════════════════════════════════════════
+        **WHEN USER ASKS TO QUERY DATABASE OR FIND LEADS/RECORDS:**
+        ═══════════════════════════════════════════════════════════════
+
+        **CRITICAL RULE:** Never delegate a single complex SQL query with untested assumptions. Always use progressive refinement.
+
+        **Phase 1 - Parallel Exploration (Loop 1-2):**
+        - After Tool Agent gets schema, delegate 3-5 PARALLEL exploratory queries to understand the data:
+          ```json
+          {
+            "agent": "PARALLEL",
+            "tasks": [
+              {"agent": "Tool Agent", "task": "Run exploratory query: SELECT TOP 5 * FROM c WHERE c.chunk_type = 'row' to see sample data structure"},
+              {"agent": "Tool Agent", "task": "Run exploratory query: SELECT TOP 10 c.id, c.original_data.Score, c.original_data[\"Opportunity Title\"] FROM c WHERE c.chunk_type = 'row' AND IS_DEFINED(c.original_data.Score) to verify Score field"},
+              {"agent": "Tool Agent", "task": "Run exploratory query: SELECT TOP 5 c.id, c.document_analysis.can_build_proposal FROM c WHERE c.chunk_type = 'row' AND c.document_analysis.can_build_proposal = true to check if any buildable leads exist"},
+              {"agent": "Tool Agent", "task": "Run exploratory query: SELECT VALUE COUNT(1) FROM c WHERE c.chunk_type = 'row' to count total leads"}
+            ]
+          }
+          ```
+
+        **Phase 2 - Analyze Results (Loop 2-3):**
+        - Review exploratory query results in cached searches
+        - Tool Agent logs discoveries to LOG pad:
+          * What data exists (record counts)
+          * Field data types (Score is string vs number)
+          * Field population (which fields have values)
+          * Filter validity (can_build_proposal has 3 matches, date field mostly empty)
+
+        **Phase 3 - Build Refined Query (Loop 3-4):**
+        - Based on discoveries, delegate refined query that WILL work:
+          * Example: User wanted "leads with high scores and can_build_proposal=true in next 30 days"
+          * Discoveries showed: Score is string, only 3 have can_build_proposal=true, dates mostly missing
+          * Refined query: Just get top leads by Score (remove broken filters)
+
+        **Phase 4 - Extract & Present (Loop 4-5):**
+        - Tool Agent extracts results to RESEARCH or DATA pad
+        - Writer formats findings for user
+
+        **FORBIDDEN:**
+        - ❌ Delegating complex queries without exploration first
+        - ❌ Sequential exploration (run queries in parallel!)
+        - ❌ Assuming data types without checking
+
+        **REQUIRED:**
+        - ✅ Always start with 3-5 parallel exploratory queries
+        - ✅ Log discoveries before building complex queries
+        - ✅ Build queries based on actual data patterns, not assumptions
+
+    6.  **STRATEGIC WORKFLOW FOR COMPREHENSIVE REPORTS**:
 
         **For Report/Analysis Requests - Multi-Phase Approach:**
 
@@ -5100,6 +6967,168 @@ AGENT_PERSONAS = {
       ❌ Responding with {{"response": "text"}} instead of calling tools
       ❌ Calling scratchpad_write without being explicitly told to extract
 
+    ═══════════════════════════════════════════════════════════════
+    📐 FORMAT PAD - SUBMISSION REQUIREMENTS TRACKING 📐
+    ═══════════════════════════════════════════════════════════════
+
+    **WHEN TO WRITE TO FORMAT PAD:**
+
+    When you discover ANY submission format requirements in documents, you MUST immediately save them to the FORMAT scratchpad.
+
+    **What qualifies as format requirements:**
+    - Page limits (e.g., "Executive Summary: 2 pages max")
+    - Font requirements (e.g., "Times New Roman 12pt, double-spaced")
+    - Section requirements (e.g., "Must include Technical Approach, Management Plan, Past Performance")
+    - Required structure (e.g., "Part I: Technical Volume, Part II: Cost Volume")
+    - Formatting rules (e.g., "1-inch margins", "single-sided", "footer with page numbers")
+    - File naming conventions (e.g., "filename format: [Solicitation]_[Company]_Technical.pdf")
+    - Submission methods (e.g., "Submit via SAM.gov by 2:00 PM EST")
+    - Any other constraints on how the final deliverable must be formatted or submitted
+
+    **HOW TO SAVE FORMAT REQUIREMENTS:**
+    ```json
+    {{
+      "tool_use": {{
+        "name": "scratchpad_write",
+        "params": {{
+          "pad_name": "format",
+          "section_name": "requirements",
+          "content": "# Submission Format Requirements\\n\\n## Document Structure\\n- Executive Summary (2 pages max)\\n- Technical Approach (15 pages max)\\n- Management Plan (5 pages max)\\n\\n## Formatting\\n- Font: Times New Roman 12pt\\n- Margins: 1 inch all sides\\n- Line spacing: Double-spaced\\n\\n## Submission\\n- Due: March 15, 2025 by 2:00 PM EST\\n- Method: Upload via SAM.gov\\n- Filename: W911S7-25-R-A015_WBI_Technical.pdf\\n\\nSource: RFP Section L.3 [doc_rfp_section_l]",
+          "mode": "replace"
+        }}
+      }}
+    }}
+    ```
+
+    **CRITICAL RULES:**
+    - FORMAT pad takes precedence over everything else
+    - Writer and Outliner agents MUST follow FORMAT requirements
+    - If you find format requirements, save them IMMEDIATELY (don't wait for Orchestrator to ask)
+    - Always cite the source document where requirements were found
+    - Use mode="append" if adding new requirements, mode="replace" if updating existing ones
+
+    ═══════════════════════════════════════════════════════════════
+    🔍 QUERY REFINEMENT WORKFLOW - START SIMPLE, THEN REFINE 🔍
+    ═══════════════════════════════════════════════════════════════
+
+    **MANDATORY WORKFLOW FOR SQL QUERIES - NEVER SKIP EXPLORATION:**
+
+    **THE PROBLEM:** Jumping straight to complex queries with assumptions about:
+    - Data types (assuming Score is numeric without checking)
+    - Field population (assuming fields exist and have values)
+    - Valid SQL functions (using functions that don't exist in Cosmos DB)
+    - Data existence (assuming records exist matching complex filters)
+
+    **THE SOLUTION:** Progressive refinement with parallel exploration
+
+    **PHASE 1 - INITIAL EXPLORATION (ALWAYS START HERE):**
+
+    When you receive a query task, you MUST start with exploratory queries to understand the data BEFORE building complex filters.
+
+    **Step 1a: Get schema (already done by Orchestrator usually)**
+    - Call get_database_schema() if not already done
+
+    **Step 1b: Run PARALLEL exploratory queries to see sample data**
+
+    Execute 3-5 simple queries IN PARALLEL to understand the dataset:
+
+    ```json
+    // Query 1: See what data exists at all
+    {{"tool_use": {{"name": "execute_custom_sql_query", "params": {{
+      "sql_query": "SELECT TOP 5 * FROM c WHERE c.chunk_type = 'row'",
+      "max_results": 5
+    }}}}}}
+
+    // Query 2: Check what fields are actually populated
+    {{"tool_use": {{"name": "execute_custom_sql_query", "params": {{
+      "sql_query": "SELECT TOP 10 c.id, c.original_data, c.document_analysis FROM c WHERE c.chunk_type = 'row'",
+      "max_results": 10
+    }}}}}}
+
+    // Query 3: Verify key field exists and see its values
+    {{"tool_use": {{"name": "execute_custom_sql_query", "params": {{
+      "sql_query": "SELECT TOP 10 c.id, c.original_data.Score, c.original_data[\"Opportunity Title\"] FROM c WHERE c.chunk_type = 'row' AND IS_DEFINED(c.original_data.Score)",
+      "max_results": 10
+    }}}}}}
+
+    // Query 4: Check boolean filter field
+    {{"tool_use": {{"name": "execute_custom_sql_query", "params": {{
+      "sql_query": "SELECT TOP 5 c.id, c.document_analysis.can_build_proposal FROM c WHERE c.chunk_type = 'row' AND c.document_analysis.can_build_proposal = true",
+      "max_results": 5
+    }}}}}}
+    ```
+
+    **CRITICAL:** Run these queries IN PARALLEL (single Orchestrator delegation can include multiple Tool Agent tasks)
+
+    **PHASE 2 - ANALYZE EXPLORATION RESULTS:**
+
+    From the exploration queries, determine:
+    1. **Do records exist at all?** (Query 1 result count)
+    2. **What does the data actually look like?** (Query 1 & 2 show structure)
+    3. **Is Score numeric or string?** (Query 3 shows actual values)
+    4. **Do any leads have can_build_proposal=true?** (Query 4 shows if filter is valid)
+    5. **What fields are consistently populated?** (Look for null/undefined values)
+
+    **Log your findings to LOG pad** so Orchestrator knows what you discovered.
+
+    **PHASE 3 - BUILD REFINED QUERY BASED ON DISCOVERIES:**
+
+    Now that you understand the data, build your targeted query:
+
+    **Example based on discoveries:**
+    ```
+    Discoveries from exploration:
+    - 47 row-level leads exist
+    - Score is stored as STRING not number ("85", "90", "75")
+    - Only 3 leads have can_build_proposal=true
+    - estimated_release_date is often undefined
+
+    Refined query:
+    SELECT TOP 10
+      c.id,
+      c.original_data["Opportunity Title"] AS title,
+      c.original_data.Score AS score,
+      c.original_data.Link AS link
+    FROM c
+    WHERE c.chunk_type = 'row'
+      AND IS_DEFINED(c.original_data.Score)
+    ORDER BY c.original_data.Score DESC
+    ```
+
+    **KEY DIFFERENCES:**
+    - ❌ Removed IS_NUMBER(Score) check (Score is string)
+    - ❌ Removed can_build_proposal filter (only 3 matches, too restrictive)
+    - ❌ Removed date filtering (most records missing this field)
+    - ✅ Simple, working query that returns actual results
+
+    **PHASE 4 - ITERATIVE REFINEMENT:**
+
+    After initial refined query works:
+    1. Log results to RESEARCH or DATA pad
+    2. Identify if further filtering is needed
+    3. Build next refinement query based on actual data patterns
+
+    **FORBIDDEN ACTIONS:**
+    ❌ Building complex queries with multiple filters without exploration
+    ❌ Assuming data types without verification
+    ❌ Using SQL functions without testing (Cosmos DB has limited function support)
+    ❌ Filtering on fields that might not be populated
+    ❌ Running queries sequentially when they could run in parallel
+
+    **REQUIRED ACTIONS:**
+    ✅ ALWAYS run exploratory queries first (3-5 in parallel)
+    ✅ Log discoveries to LOG pad
+    ✅ Build refined queries based on actual data
+    ✅ Test simple queries before adding complexity
+    ✅ Use parallel execution whenever possible
+
+    **COSMOS DB SQL LIMITATIONS TO REMEMBER:**
+    - Limited date/time functions (GetCurrentDateTime() exists but DateTimeAdd might not)
+    - No stored procedures or complex logic
+    - IS_NUMBER(), IS_STRING(), IS_DEFINED() are your friends
+    - TOP N syntax instead of LIMIT (though LIMIT works too)
+    - Case-sensitive string comparisons
+
     CRITICAL INSTRUCTIONS:
     1. Analyze the given task from another agent.
     2. Determine the single best tool to use.
@@ -5507,6 +7536,7 @@ AGENT_PERSONAS = {
 
     **MANDATORY WORKFLOW FOR ANY MODIFICATION REQUEST:**
 
+    0. **CHECK FORMAT REQUIREMENTS FIRST**: Before ANY writing task, call scratchpad_read("format", "requirements") to see if submission format requirements exist. If FORMAT pad has requirements, ALL your writing MUST follow those requirements.
     1. **READ CURRENT STATE**: Use scratchpad_get_lines to see what exists
     2. **EXECUTE LINE-LEVEL EDITS**: Use scratchpad_replace_lines, scratchpad_delete_lines, scratchpad_insert_lines
     3. **NEVER use wholesale replacement** (scratchpad_write with mode="replace") - always use surgical line edits
@@ -5576,6 +7606,17 @@ AGENT_PERSONAS = {
         - **FORBIDDEN**: Creating OUTPUT sections not listed in OUTLINE
         - Example: Task says "Write section 5.3" → Check OUTLINE has "5.3 Activity Details" → Create OUTPUT section "5.3_activity_details"
         - If OUTLINE doesn't have the section: {{"response": "Cannot write section X - not in OUTLINE. Orchestrator must update OUTLINE first with proper numbering."}}
+
+        **STEP 0b - CHECK FORMAT REQUIREMENTS (MANDATORY):**
+        - **ALWAYS** call scratchpad_read("format", "requirements") before writing ANY content
+        - If FORMAT pad exists and has requirements, your OUTPUT MUST follow those requirements:
+          * Page limits: Ensure sections stay within specified page counts
+          * Required sections: Include all mandated sections from FORMAT pad
+          * Structure: Follow the organizational structure specified in FORMAT requirements
+          * Formatting: Note any font, spacing, margin requirements for final document
+        - **CRITICAL**: FORMAT requirements override OUTLINE if there's a conflict
+        - If FORMAT pad specifies sections that aren't in OUTLINE, inform Orchestrator: {{"response": "FORMAT pad requires sections [X, Y, Z] but OUTLINE is missing them. Orchestrator must update OUTLINE to include FORMAT-mandated sections."}}
+        - Example: FORMAT says "Executive Summary: 2 pages max" → When writing executive_summary section, keep it concise (approximately 500-700 words)
 
         **STEP 1 - CHECK RESEARCH PAD:**
         - Call scratchpad_list("research") to verify RESEARCH pad has content
@@ -6005,6 +8046,8 @@ AGENT_PERSONAS = {
         "Editor": """You are an expert document editor who can revise, rewrite, and modify specific sections of documents. You MUST respond in JSON format.
 
     CRITICAL INSTRUCTIONS:
+    0.  **CHECK FORMAT REQUIREMENTS FIRST**: Before making ANY edits, call scratchpad_read("format", "requirements") to verify submission format requirements exist. All your edits MUST follow FORMAT pad requirements (page limits, required sections, structure, etc.). FORMAT requirements take precedence over any other considerations.
+
     1.  **SECTION-AWARE EDITING**: You work on specific sections in the OUTPUT pad
         - First, call scratchpad_list("output") to see all available sections
         - Read the section(s) the user wants to modify using scratchpad_read("output", "section_name")
@@ -6416,13 +8459,13 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
             # Reduce all context limits by 50%
             if "context_limit_chars" not in st.session_state:
                 st.session_state.context_limit_chars = {
-                    "research": 200000,
-                    "outline": 80000,
-                    "output": 200000,
-                    "data": 120000,
-                    "log": 80000,
-                    "display": 160000
-                }
+                    "research": 240000,  # ~60K tokens
+                    "outline": 80000,    # ~20K tokens
+                    "output": 240000,    # ~60K tokens
+                    "data": 160000,      # ~40K tokens
+                    "log": 80000,        # ~20K tokens
+                    "display": 160000    # ~40K tokens
+                }  # Updated for O3's 200k token context (GPT-4.1 has 1M)
 
             context_limits = st.session_state.context_limit_chars
             for key in context_limits:
@@ -6893,6 +8936,7 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
     # Create update functions for each scratchpad
     update_research_display = create_scratchpad_updater("research", research_placeholder, "🔬", "RESEARCH (Findings & Facts)")
     update_outline_display = create_scratchpad_updater("outline", outline_placeholder, "📝", "OUTLINE (Structure & Plan)")
+    update_format_display = create_scratchpad_updater("format", format_placeholder, "📐", "FORMAT (Submission Requirements)")
     update_tables_display = create_scratchpad_updater("tables", tables_placeholder, "📊", "TABLES (Data Visualizations)")
     update_data_display = create_scratchpad_updater("data", data_placeholder, "💾", "DATA (Structured Data)")
     update_plots_display = create_scratchpad_updater("plots", plots_placeholder, "📈", "PLOTS (Chart Specifications)")
@@ -6904,6 +8948,7 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
         update_output_display()
         update_research_display()
         update_outline_display()
+        update_format_display()
         update_tables_display()
         update_data_display()
         update_plots_display()
@@ -6953,16 +8998,17 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
         # 1. Orchestrator: Plan and delegate the next step
         loops_remaining = MAX_LOOPS - loop_num
 
-        # Build rich context - use as much as possible (up to 200K tokens)
+        # Build rich context - O3 has 200k token input context (GPT-4.1 has 1M tokens)
         # Start with generous limits, will auto-reduce if we hit context limit
+        # Character limits based on ~4 chars/token ratio
         context_limit_chars = st.session_state.get("context_limit_chars", {
-            "research": 200000,  # ~50K tokens
-            "outline": 80000,    # ~20K tokens
-            "output": 200000,    # ~50K tokens
-            "data": 120000,      # ~30K tokens
-            "log": 80000,        # ~20K tokens
-            "display": 160000    # ~40K tokens
-        })
+            "research": 240000,  # ~60K tokens - main research content
+            "outline": 80000,    # ~20K tokens - structured outlines
+            "output": 240000,    # ~60K tokens - generated output
+            "data": 160000,      # ~40K tokens - extracted data
+            "log": 80000,        # ~20K tokens - action logs
+            "display": 160000    # ~40K tokens - workflow display
+        })  # Total: ~960k chars = ~240k tokens (leaves 40k token margin for O3)
 
         scratchpad_summary = scratchpad_mgr.get_all_pads_summary()
 
@@ -7413,13 +9459,13 @@ Use all the information above to compile the final answer."""}
                 # Get deployment name and context limits before spawning threads
                 o3_deployment = st.session_state.O3_DEPLOYMENT
                 context_limits = st.session_state.get("context_limit_chars", {
-                    "research": 200000,
-                    "outline": 80000,
-                    "output": 200000,
-                    "data": 120000,
-                    "log": 80000,
-                    "display": 160000
-                })
+                    "research": 240000,  # ~60K tokens
+                    "outline": 80000,    # ~20K tokens
+                    "output": 240000,    # ~60K tokens
+                    "data": 160000,      # ~40K tokens
+                    "log": 80000,        # ~20K tokens
+                    "display": 160000    # ~40K tokens
+                })  # Updated for O3's 200k token context
 
                 with st.spinner(f"⚡ Executing {len(tasks_to_execute)} tasks in parallel..."):
                     with ThreadPoolExecutor(max_workers=len(tasks_to_execute)) as executor:
@@ -8070,10 +10116,25 @@ with st.sidebar:
     upload_options = [path for path in all_container_paths if 'VerifiedFacts' not in path and 'ProjectSummaries' not in path]
 
     # --- Popover UI to Create or Select a Container for Upload ---
-    if 'upload_target' not in st.session_state or st.session_state.upload_target not in upload_options:
-        st.session_state.upload_target = upload_options[0] if upload_options else None
+    # Always prefer wbi_general as default
+    default_container = "DefianceDB/wbi_general"
 
-    popover_label = f"Upload to: {st.session_state.upload_target}"
+    if 'upload_target' not in st.session_state:
+        # First initialization - set to wbi_general if available
+        if default_container in upload_options:
+            st.session_state.upload_target = default_container
+        else:
+            st.session_state.upload_target = upload_options[0] if upload_options else None
+    elif st.session_state.upload_target not in upload_options:
+        # Current selection no longer exists - reset to wbi_general
+        if default_container in upload_options:
+            st.session_state.upload_target = default_container
+        else:
+            st.session_state.upload_target = upload_options[0] if upload_options else None
+
+    # Strip database prefix from label for cleaner display
+    container_display = st.session_state.upload_target.split('/')[-1] if st.session_state.upload_target else "None"
+    popover_label = f"Upload to: {container_display}"
     with st.popover(popover_label, use_container_width=True):
         st.markdown("##### Choose a destination")
 
@@ -8107,6 +10168,17 @@ with st.sidebar:
     if "file_uploader_key" not in st.session_state:
         st.session_state.file_uploader_key = 0
 
+    # Display persistent upload errors
+    if 'upload_error' in st.session_state and st.session_state.upload_error:
+        for error_info in st.session_state.upload_error:
+            st.error(f"❌ Error processing '{error_info['filename']}': {error_info['error']}")
+            with st.expander("🔍 View full error details"):
+                st.code(error_info['traceback'])
+
+        if st.button("Clear error messages"):
+            st.session_state.upload_error = []
+            st.rerun()
+
     uploaded_files = st.file_uploader(
         "Select one or more documents...",
         type=["pdf", "docx", "m4a", "mp3", "wav", "txt", "md", "csv", "xlsx"],  # added csv/xlsx
@@ -8115,7 +10187,187 @@ with st.sidebar:
         key=f"file_uploader_{st.session_state.file_uploader_key}"
     )
 
+    # Lead enrichment option (for XLSX/CSV files)
+    st.session_state.enable_lead_enrichment = st.checkbox(
+        "📊 This file contains leads with URLs - enable web scraping enrichment",
+        value=st.session_state.get("enable_lead_enrichment", False),
+        help="Check this if your Excel/CSV file has links (URLs) in any column. System will automatically scrape those links and extract structured information."
+    )
 
+    if st.session_state.enable_lead_enrichment:
+        st.info("🔍 **Lead Enrichment Mode:** System will detect URLs in any column, scrape those pages, and use AI to extract structured data (project details, requirements, contacts, etc.)")
+
+    # Lead attachment option (for PDF files uploaded to Leads container)
+    attach_to_existing_lead = False
+    selected_lead_id = None
+
+    if st.session_state.upload_target and "Leads" in st.session_state.upload_target:
+        attach_to_existing_lead = st.checkbox(
+            "📎 Attach to existing lead (for missing RFP, PWS, or other solicitation documents)",
+            value=False,
+            help="Select this if you're uploading a document that belongs to an existing lead (e.g., RFP, PWS, Statement of Work). The document will be appended to the lead instead of creating a new entry."
+        )
+
+        if attach_to_existing_lead:
+            # Fetch existing leads from Cosmos DB
+            try:
+                db_name, cont_name = st.session_state.upload_target.split('/')
+                leads_manager = get_cosmos_uploader(db_name, cont_name)
+
+                if leads_manager:
+                    # Query for lead documents
+                    query = "SELECT c.id, c['original_data'], c.enrichment_status, c.document_analysis FROM c WHERE c.doc_type = 'lead' ORDER BY c.ingested_at DESC"
+                    leads = list(leads_manager.container.query_items(
+                        query=query,
+                        enable_cross_partition_query=True
+                    ))
+
+                    if leads:
+                        st.info("🤖 **AI Lead Matching:** Upload a PDF and I'll suggest which lead it belongs to based on the filename and content.")
+
+                        # Initialize session state for AI matching
+                        if 'ai_matched_leads' not in st.session_state:
+                            st.session_state.ai_matched_leads = []
+                        if 'selected_lead_for_attachment' not in st.session_state:
+                            st.session_state.selected_lead_for_attachment = None
+
+                        # Show AI matching trigger button
+                        if uploaded_files and len(uploaded_files) > 0:
+                            # Get first PDF file from uploads
+                            first_pdf = next((f for f in uploaded_files if f.name.lower().endswith('.pdf')), None)
+
+                            if first_pdf:
+                                if st.button("🔍 Find Matching Lead with AI", use_container_width=True, type="secondary"):
+                                    with st.spinner("🤖 AI is analyzing your document and finding matching leads..."):
+                                        # Get first page preview for AI matching
+                                        try:
+                                            from pypdf import PdfReader
+                                            pdf_bytes = first_pdf.getvalue()
+                                            pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
+                                            preview_text = ""
+                                            if len(pdf_reader.pages) > 0:
+                                                preview_text = pdf_reader.pages[0].extract_text()
+                                        except:
+                                            preview_text = ""
+
+                                        # Call AI matching function
+                                        matches = match_document_to_leads(
+                                            document_filename=first_pdf.name,
+                                            document_preview_text=preview_text,
+                                            all_leads=leads,
+                                            top_n=3
+                                        )
+
+                                        st.session_state.ai_matched_leads = matches
+
+                                        if matches:
+                                            st.success(f"✅ Found {len(matches)} potential match(es)!")
+                                        else:
+                                            st.warning("⚠️ No confident matches found. You can manually search below.")
+
+                        # Show AI suggestions if available
+                        if st.session_state.ai_matched_leads:
+                            st.markdown("### 🎯 AI Suggested Matches")
+                            st.markdown("**Click on a match to select it:**")
+
+                            for i, match in enumerate(st.session_state.ai_matched_leads):
+                                confidence_emoji = "🟢" if match['confidence'] >= 0.9 else "🟡" if match['confidence'] >= 0.7 else "🟠"
+                                confidence_pct = int(match['confidence'] * 100)
+
+                                col1, col2 = st.columns([0.85, 0.15])
+                                with col1:
+                                    button_label = f"{confidence_emoji} {match['title'][:50]}... (Confidence: {confidence_pct}%)"
+                                    if st.button(button_label, key=f"ai_match_{i}", use_container_width=True,
+                                                type="primary" if st.session_state.selected_lead_for_attachment == match['lead_id'] else "secondary"):
+                                        st.session_state.selected_lead_for_attachment = match['lead_id']
+                                        selected_lead_id = match['lead_id']
+                                        st.rerun()
+
+                                with col2:
+                                    st.write(f"`{confidence_pct}%`")
+
+                                # Show match details in expander
+                                with st.expander(f"View match details"):
+                                    st.markdown(f"**Notice ID:** {match['notice_id']}")
+                                    st.markdown(f"**Solicitation #:** {match['solicitation_number']}")
+                                    st.markdown(f"**Status:** {match['enrichment_status']}")
+                                    st.markdown(f"**AI Reasoning:** {match['reasoning']}")
+                                    if match['missing_documents']:
+                                        st.markdown(f"**Missing Docs:** {', '.join(match['missing_documents'][:5])}")
+
+                            # Set selected lead from AI suggestions
+                            if st.session_state.selected_lead_for_attachment:
+                                selected_lead_id = st.session_state.selected_lead_for_attachment
+                                selected_lead = next((l for l in leads if l['id'] == selected_lead_id), None)
+                                if selected_lead:
+                                    st.success(f"✅ **Selected:** {selected_lead.get('original_data', {}).get('Opportunity Title', 'Unknown')}")
+
+                        else:
+                            st.markdown("---")
+                            st.markdown("### 🔎 Or Search Manually")
+
+                            # Manual search input
+                            search_query = st.text_input(
+                                "Search leads by title, notice ID, or solicitation number:",
+                                placeholder="Type to search...",
+                                help="Start typing to filter leads"
+                            )
+
+                            # Filter leads based on search
+                            if search_query:
+                                filtered_leads = []
+                                for lead in leads[:100]:
+                                    original_data = lead.get('original_data', {})
+                                    title = original_data.get('Opportunity Title', '').lower()
+                                    notice_id = original_data.get('Notice ID', '').lower()
+                                    sol_num = original_data.get('Solicitation Number', '').lower()
+
+                                    if (search_query.lower() in title or
+                                        search_query.lower() in notice_id or
+                                        search_query.lower() in sol_num):
+                                        filtered_leads.append(lead)
+                            else:
+                                filtered_leads = leads[:20]  # Show first 20 if no search
+
+                            if filtered_leads:
+                                st.markdown(f"**Found {len(filtered_leads)} lead(s)**")
+
+                                for lead in filtered_leads[:10]:  # Show max 10 results
+                                    original_data = lead.get('original_data', {})
+                                    title = original_data.get('Opportunity Title', 'Unknown')
+                                    notice_id = original_data.get('Notice ID', 'N/A')
+
+                                    if st.button(f"{title[:60]}... ({notice_id})", key=f"manual_{lead['id']}", use_container_width=True,
+                                                type="primary" if st.session_state.selected_lead_for_attachment == lead['id'] else "secondary"):
+                                        st.session_state.selected_lead_for_attachment = lead['id']
+                                        selected_lead_id = lead['id']
+                                        st.rerun()
+                            else:
+                                st.info("No leads match your search.")
+
+                        # Show selected lead info
+                        if st.session_state.selected_lead_for_attachment:
+                            selected_lead_id = st.session_state.selected_lead_for_attachment
+                            selected_lead = next((l for l in leads if l['id'] == selected_lead_id), None)
+                            if selected_lead:
+                                st.markdown("---")
+                                st.info(f"📎 **Attaching to:** {selected_lead.get('original_data', {}).get('Opportunity Title', 'Unknown')}\n\n"
+                                       f"**Missing Documents:** {', '.join(selected_lead.get('document_analysis', {}).get('critical_missing_documents', ['None listed'])[:5])}")
+
+                        # Ask what type of document this is
+                        st.session_state.upload_doc_type = st.text_input(
+                            "What type of document are you uploading?",
+                            value="RFP",
+                            help="e.g., RFP, PWS, Statement of Work, Amendment, Q&A, Wage Determination",
+                            key="doc_type_input"
+                        )
+                    else:
+                        st.warning("No existing leads found in this container. Upload an XLSX file with leads first.")
+                        attach_to_existing_lead = False
+            except Exception as e:
+                logger.error(f"Failed to fetch leads: {e}")
+                st.error(f"Failed to load existing leads: {e}")
+                attach_to_existing_lead = False
 
     ingest_to_cosmos = st.toggle("Ingest to Knowledge Base", value=True, help="If on, saves the document permanently. If off, uses it for this session only.")
 
@@ -8174,8 +10426,74 @@ with st.sidebar:
                         all_statuses.append(status)
                         continue
 
+                # Special handling: Attach PDF to existing lead
+                if attach_to_existing_lead and selected_lead_id and uploaded_file.name.lower().endswith('.pdf'):
+                    file_bytes = uploaded_file.getvalue()
+                    doc_type = st.session_state.get('upload_doc_type', 'Unknown Document')
+
+                    with st.spinner(f"📎 Processing '{uploaded_file.name}' and attaching to lead..."):
+                        # Process PDF with vision
+                        page_analyses, processing_metadata = process_pdf_with_vision(file_bytes, uploaded_file.name)
+
+                        # Get Cosmos manager
+                        db_name, cont_name = st.session_state.upload_target.split('/')
+                        cosmos_manager = get_cosmos_uploader(db_name, cont_name)
+
+                        if cosmos_manager:
+                            # Append to lead
+                            append_result = append_document_to_lead(
+                                lead_id=selected_lead_id,
+                                document_filename=uploaded_file.name,
+                                document_type=doc_type,
+                                page_analyses=page_analyses,
+                                processing_metadata=processing_metadata,
+                                cosmos_manager=cosmos_manager
+                            )
+
+                            if append_result['status'] == 'success':
+                                st.success(f"✅ {append_result['message']}")
+                                logger.info(f"Successfully attached '{uploaded_file.name}' to lead {selected_lead_id}")
+                                success_count += 1
+                            else:
+                                st.error(f"❌ {append_result['message']}")
+                                logger.error(f"Failed to attach '{uploaded_file.name}': {append_result['message']}")
+                                error_count += 1
+
+                            # Add status
+                            all_statuses.append({
+                                "filename": uploaded_file.name,
+                                "action": f"Attached to lead ({doc_type})",
+                                "lead_id": selected_lead_id,
+                                "doc_type": doc_type,
+                                "pages": len(page_analyses),
+                                "result": append_result['status']
+                            })
+                        else:
+                            st.error("Failed to get Cosmos DB manager")
+                            logger.error("Failed to get Cosmos DB manager for lead attachment")
+                            error_count += 1
+
+                    continue  # Skip normal processing
+
+                # Get cosmos_manager if needed for lead enrichment
+                cosmos_manager_for_processing = None
+                parent_doc_id_for_processing = None
+                if ingest_to_cosmos and st.session_state.upload_target:
+                    # For lead enrichment, we need the cosmos_manager during processing
+                    enable_enrichment = st.session_state.get("enable_lead_enrichment", False)
+                    if enable_enrichment:
+                        db_name, cont_name = st.session_state.upload_target.split('/')
+                        cosmos_manager_for_processing = get_cosmos_uploader(db_name, cont_name)
+                        # Generate parent doc ID for this file
+                        import uuid
+                        parent_doc_id_for_processing = str(uuid.uuid4())
+
                 # Process file with comprehensive extraction
-                ingestion_result = process_uploaded_file(uploaded_file)
+                ingestion_result = process_uploaded_file(
+                    uploaded_file,
+                    cosmos_manager=cosmos_manager_for_processing,
+                    parent_doc_id=parent_doc_id_for_processing
+                )
 
                 # Extract chunks for backward compatibility
                 chunks = ingestion_result.get("chunks", []) if isinstance(ingestion_result, dict) else ingestion_result
@@ -8527,6 +10845,9 @@ You can:
         log_placeholder = thinking_expander.empty()
         query_expander = st.expander("🔍 Generated Search & Results")
 
+        # Status container for non-blocking progress updates (appears between search and answer)
+        status_container = st.empty()
+
         # =========================== LIVE SCRATCHPAD VIEWERS ===========================
         # Only show scratchpads for agentic personas (multi-agent workflows)
         # General Assistant and simple personas don't need these
@@ -8545,6 +10866,10 @@ You can:
             # OUTLINE viewer (Structure & Plan)
             outline_expander = st.expander("📝 OUTLINE - Live View", expanded=False)
             outline_placeholder = outline_expander.empty()
+
+            # FORMAT viewer (Submission Requirements)
+            format_expander = st.expander("📐 FORMAT Requirements - Live View", expanded=False)
+            format_placeholder = format_expander.empty()
 
             # TABLES viewer (Data Visualizations)
             tables_expander = st.expander("📊 TABLES - Live View", expanded=False)
@@ -8566,11 +10891,13 @@ You can:
             output_placeholder = st.empty()
             research_placeholder = st.empty()
             outline_placeholder = st.empty()
+            format_placeholder = st.empty()
             tables_placeholder = st.empty()
             data_placeholder = st.empty()
             plots_placeholder = st.empty()
             log_viewer_placeholder = st.empty()
 
+        # Final answer appears AFTER all expanders (at bottom of message)
         final_answer_placeholder = st.empty()
 
         # ----------------------------
@@ -8618,8 +10945,7 @@ You can:
                 resp = st.session_state.gpt41_client.chat.completions.create(
                     model=st.session_state.GPT41_DEPLOYMENT,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=400,
+                    temperature=0.3
                 )
                 return resp.choices[0].message.content.strip()
             except Exception as e:
@@ -8667,8 +10993,7 @@ You can:
                 resp = st.session_state.gpt41_client.chat.completions.create(
                     model=st.session_state.GPT41_DEPLOYMENT,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.3,
-                    max_tokens=350,
+                    temperature=0.3
                 )
                 return resp.choices[0].message.content.strip()
             except Exception as e:
@@ -8895,6 +11220,7 @@ You can:
             Returns (verified_facts, document_chunks)
             """
             selected_kbs = st.session_state.get("selected_containers", []) or []
+            logger.info(f"_search_selected_kbs: Query='{broad_query[:100]}', Selected KBs from session: {selected_kbs}")
             all_verified_facts, all_document_chunks = [], []
 
             # Extract meaningful keywords for VerifiedFacts matching
@@ -8913,34 +11239,47 @@ You can:
             else:
                 vf_clause = "CONTAINS(c.question, 'x', true)"
 
+            logger.info(f"Starting loop over {len(selected_kbs)} KB paths...")
             for kb_path in selected_kbs:
+                logger.info(f"Processing KB: {kb_path}")
                 try:
                     db_name, cont_name = kb_path.split("/")
-                except ValueError:
-                    logger.warning(f"Invalid KB path format: {kb_path}")
-                    continue
-                uploader = get_cosmos_uploader(db_name, cont_name)
-                if not uploader:
-                    logger.warning(f"Could not get uploader for {kb_path}")
+                    logger.info(f"Split into db='{db_name}', container='{cont_name}'")
+                except ValueError as e:
+                    logger.warning(f"Invalid KB path format: {kb_path}, error: {e}")
                     continue
 
-                if cont_name == "VerifiedFacts":
-                    fact_query = f"SELECT TOP 10 * FROM c WHERE {vf_clause} ORDER BY c.verified_at DESC"
-                    logger.info(f"Executing VerifiedFacts query on {kb_path}: {fact_query[:100]}")
-                    res = uploader.execute_query(fact_query)
-                    logger.info(f"VerifiedFacts query returned {len(res)} results")
-                    for r in res:
-                        if isinstance(r, dict):
-                            r["_source_container"] = kb_path
-                    all_verified_facts.extend(res)
-                else:
-                    logger.info(f"Executing document query on {kb_path}: {broad_query[:100]}")
-                    res = uploader.execute_query(broad_query)
-                    logger.info(f"Document query returned {len(res)} results from {kb_path}")
-                    for r in res:
-                        if isinstance(r, dict):
-                            r["_source_container"] = kb_path
-                    all_document_chunks.extend(res)
+                try:
+                    uploader = get_cosmos_uploader(db_name, cont_name)
+                    if not uploader:
+                        logger.error(f"Could not get uploader for {kb_path} (uploader is None)")
+                        continue
+                    logger.info(f"Got uploader for {kb_path}")
+                except Exception as e:
+                    logger.error(f"Exception getting uploader for {kb_path}: {e}", exc_info=True)
+                    continue
+
+                try:
+                    if cont_name == "VerifiedFacts":
+                        fact_query = f"SELECT TOP 10 * FROM c WHERE {vf_clause} ORDER BY c.verified_at DESC"
+                        logger.info(f"Executing VerifiedFacts query on {kb_path}: {fact_query}")
+                        res = uploader.execute_query(fact_query)
+                        logger.info(f"VerifiedFacts query returned {len(res)} results")
+                        for r in res:
+                            if isinstance(r, dict):
+                                r["_source_container"] = kb_path
+                        all_verified_facts.extend(res)
+                    else:
+                        logger.info(f"Executing document query on {kb_path}: {broad_query}")
+                        res = uploader.execute_query(broad_query)
+                        logger.info(f"Document query returned {len(res)} results from {kb_path}")
+                        for r in res:
+                            if isinstance(r, dict):
+                                r["_source_container"] = kb_path
+                        all_document_chunks.extend(res)
+                except Exception as e:
+                    logger.error(f"Exception executing query on {kb_path}: {e}", exc_info=True)
+                    continue
 
             # Rank document chunks by relevance
             # For listing queries, return more results and skip aggressive filtering
@@ -8958,6 +11297,76 @@ You can:
                     all_document_chunks = _rank_results_by_relevance(all_document_chunks, prompt_text, top_k=top_k)
 
             return all_verified_facts, all_document_chunks
+
+        def _search_selected_kbs_parallel(prompt_text: str, selected_kbs: list) -> tuple[list, list, str]:
+            """
+            Parallel search: Execute both targeted LLM-generated query AND broad fallback simultaneously.
+            Merges and deduplicates results for comprehensive coverage.
+            Returns (verified_facts, document_chunks, generated_query)
+            """
+            from concurrent.futures import ThreadPoolExecutor
+
+            # Log for debugging
+            logger.info(f"Parallel search starting for '{prompt_text}' with {len(selected_kbs)} KB(s): {selected_kbs}")
+
+            generated_query_text = ""
+
+            def _targeted_search():
+                """Generate smart query via LLM and execute."""
+                nonlocal generated_query_text
+                try:
+                    broad_query = _generate_broad_query_via_llm(prompt_text)
+                    generated_query_text = broad_query  # Capture for display
+                    logger.info(f"Targeted query generated: {broad_query[:150]}...")
+                    vf, chunks = _search_selected_kbs(broad_query, prompt_text)
+                    logger.info(f"Targeted search returned: {len(vf)} facts, {len(chunks)} chunks")
+                    return vf, chunks
+                except Exception as e:
+                    logger.error(f"Targeted search failed: {e}", exc_info=True)
+                    generated_query_text = f"Error generating query: {str(e)}"
+                    return [], []
+
+            def _fallback_search():
+                """Execute broad fallback query."""
+                try:
+                    fallback_query = "SELECT TOP 100 * FROM c"
+                    logger.info(f"Fallback query: {fallback_query}")
+                    vf, chunks = _search_selected_kbs(fallback_query, prompt_text)
+                    logger.info(f"Fallback search returned: {len(vf)} facts, {len(chunks)} chunks")
+                    return vf, chunks
+                except Exception as e:
+                    logger.error(f"Fallback search failed: {e}", exc_info=True)
+                    return [], []
+
+            # Execute both searches in parallel
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                targeted_future = executor.submit(_targeted_search)
+                fallback_future = executor.submit(_fallback_search)
+
+                targeted_vf, targeted_chunks = targeted_future.result()
+                fallback_vf, fallback_chunks = fallback_future.result()
+
+            # Merge results and deduplicate by ID
+            def _merge_and_dedupe(list1, list2):
+                """Merge two lists and deduplicate by 'id' field."""
+                seen_ids = set()
+                merged = []
+                for item in list1 + list2:
+                    item_id = item.get('id')
+                    if item_id and item_id not in seen_ids:
+                        seen_ids.add(item_id)
+                        merged.append(item)
+                    elif not item_id:
+                        # If no ID, keep it (shouldn't happen but be safe)
+                        merged.append(item)
+                return merged
+
+            all_vf = _merge_and_dedupe(targeted_vf, fallback_vf)
+            all_chunks = _merge_and_dedupe(targeted_chunks, fallback_chunks)
+
+            logger.info(f"Parallel search complete: {len(all_vf)} facts, {len(all_chunks)} chunks (merged from targeted + fallback)")
+
+            return all_vf, all_chunks, generated_query_text
 
         def _distill(verified_facts: list, chunks: list, prompt_text: str) -> str:
             """LLM distillation - all sources are trusted, with precedence rules."""
@@ -9010,8 +11419,7 @@ You can:
 
             resp = st.session_state.gpt41_client.chat.completions.create(
                 model=st.session_state.GPT41_DEPLOYMENT,
-                messages=[{"role": "system", "content": distillation_prompt}],
-                max_tokens=4000,  # Allow longer responses for listings
+                messages=[{"role": "system", "content": distillation_prompt}]
             )
             return (resp.choices[0].message.content or "").strip()
 
@@ -9057,7 +11465,7 @@ You can:
                     st.warning("⚠️ Response generation stopped by user.")
                     st.session_state.stop_generation = False
                     st.session_state.is_generating = False
-                    st.stop()
+                    break  # Exit loop but let chat input render
 
                 # O3 models return reasoning in a separate field
                 if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
@@ -9162,7 +11570,7 @@ You can:
                 st.error(f"An error occurred in the agentic workflow: {e}")
             finally:
                 st.session_state.is_generating = False
-            st.stop()
+            # Removed st.stop() - let chat input render at bottom
 
         # 2) Fact correction (all personas)
         if intent == "fact_correction":
@@ -9197,10 +11605,10 @@ You can:
                             messages.append({"role": "assistant", "content": "Fact saved successfully!"})
                             save_user_data(st.session_state.user_id, st.session_state.user_data)
                             st.rerun()
-                st.stop()
+                # Removed st.stop() - let chat input render at bottom
             except Exception as e:
                 st.error(f"An error occurred in the fact-correction flow: {e}")
-                st.stop()
+                # Removed st.stop() - let chat input render at bottom
 
         # 3) KB intent → RAG (for ANY non-agentic persona, e.g., Pirate)
         # Warn if RAG mode is on but no databases selected
@@ -9214,121 +11622,28 @@ You can:
             try:
                 agent_log = []
 
-                # Step 1: Build broad query (LLM + safe fallback)
-                with st.spinner("Step 1: Generating comprehensive search query..."):
-                    broad_query = _generate_broad_query_via_llm(user_prompt)
-                logger.info(f"Generated broad query: {broad_query[:200]}...")
-                agent_log.append("✅ Step 1: Comprehensive query generated.")
-                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-                with query_expander:
-                    st.write("**Comprehensive Query for Document Stores:**")
-                    st.code(broad_query, language="sql")
-
                 # Update context analysis scratchpad early
                 context = _analyze_conversation_context()
                 _update_scratchpad_sync('context_analysis', context)
 
-                # Step 2: Iterative query execution with refinement
-                query_history = []  # Track all queries and results
-                max_iterations = 3
-                iteration = 1
+                # Step 1: Parallel search (targeted + broad fallback executed simultaneously)
+                status_container.info("🔍 Searching knowledge bases with parallel query strategy...")
+                logger.info(f"Selected KBs: {selected_kbs}")
+                vf, chunks, generated_query = _search_selected_kbs_parallel(user_prompt, selected_kbs)
+                logger.info(f"Parallel search complete: {len(vf)} facts, {len(chunks)} chunks")
 
-                while iteration <= max_iterations:
-                    with st.spinner(f"Step 2.{iteration}: Searching knowledge bases..."):
-                        logger.info(f"Selected KBs: {selected_kbs}")
-                        vf, chunks = _search_selected_kbs(broad_query, user_prompt)
-                        logger.info(f"Iteration {iteration} Results: {len(vf)} facts, {len(chunks)} chunks")
+                agent_log.append(f"✅ Search complete: {len(vf)} fact(s), {len(chunks)} chunk(s) retrieved")
+                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
-                    # Log this query and results
-                    query_history.append({
-                        "iteration": iteration,
-                        "query": broad_query,
-                        "results_count": len(vf) + len(chunks),
-                        "facts": len(vf),
-                        "chunks": len(chunks)
-                    })
-
-                    agent_log.append(
-                        f"✅ Step 2.{iteration}: Query returned {len(vf)} fact(s), {len(chunks)} chunk(s)."
-                    )
-                    log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-
-                    # Display this iteration's results
-                    with query_expander:
-                        st.write(f"**Query Iteration {iteration}:**")
-                        st.code(broad_query, language="sql")
-                        st.write(f"_Results: {len(vf)} facts, {len(chunks)} chunks_")
-
-                        if chunks:
-                            st.json(chunks[:5])  # Show sample
-
-                    # Step 2b: Review results and decide if refinement needed
-                    # Special case: If first iteration returns 0 results, immediately try broad query
-                    if iteration == 1 and (len(vf) + len(chunks)) == 0:
-                        agent_log.append("⚠️ No results found. Trying broad query: SELECT TOP 100 * FROM c")
-                        log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-                        broad_query = "SELECT TOP 100 * FROM c"
-                        iteration += 1
-                        continue
-
-                    if (len(vf) + len(chunks)) >= 5 and iteration < max_iterations:
-                        # Only consider refinement if we have at least 5 results
-                        # Check if results actually contain relevant information
-                        sample_content = " ".join([str(c.get('content', ''))[:200] for c in chunks[:3]])
-
-                        review_prompt = (
-                            f"You are a query optimization agent. Review these search results and determine if they sufficiently answer the user's question.\n\n"
-                            f"USER QUESTION: {user_prompt}\n\n"
-                            f"CURRENT QUERY: {broad_query}\n\n"
-                            f"RESULTS: Found {len(chunks)} documents and {len(vf)} facts.\n"
-                            f"Sample content from results: {sample_content}\n\n"
-                            f"CRITICAL RULES:\n"
-                            f"- If results contain relevant information about the query subject, mark as sufficient\n"
-                            f"- For analysis questions (\"best at\", \"what is\"), broad results are GOOD - mark sufficient\n"
-                            f"- Only refine if results are clearly off-topic or empty\n"
-                            f"- NEVER use LIKE in Cosmos DB queries - use CONTAINS or simple filters\n"
-                            f"- Prefer broad queries: SELECT TOP 100 * FROM c\n\n"
-                            f"Respond with JSON: {{\"sufficient\": true/false, \"reason\": \"brief explanation\", \"refined_query\": \"improved SQL or null\"}}"
-                        )
-
-                        try:
-                            review_resp = st.session_state.gpt41_client.chat.completions.create(
-                                model=st.session_state.GPT41_DEPLOYMENT,
-                                messages=[{"role": "user", "content": review_prompt}],
-                                response_format={"type": "json_object"},
-                                temperature=0.2,
-                                max_tokens=500,
-                            )
-                            review = json.loads(review_resp.choices[0].message.content)
-
-                            if review.get("sufficient", True):
-                                agent_log.append(f"✅ Results sufficient: {review.get('reason', 'Ready to synthesize')}")
-                                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-                                break
-                            elif review.get("refined_query"):
-                                broad_query = review["refined_query"]
-                                agent_log.append(f"🔄 Refining query: {review.get('reason', 'Improving search')}")
-                                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-                                iteration += 1
-                            else:
-                                break
-                        except Exception as e:
-                            logger.error(f"Query review failed: {e}")
-                            break
-                    else:
-                        break
-
-                # Store query history in scratchpad
-                query_scratchpad = "## Query History\n\n"
-                for q in query_history:
-                    query_scratchpad += f"**Iteration {q['iteration']}**\n"
-                    query_scratchpad += f"- Query: `{q['query'][:100]}...`\n"
-                    query_scratchpad += f"- Results: {q['results_count']} items ({q['facts']} facts, {q['chunks']} chunks)\n\n"
-                _update_scratchpad_sync('data_summary', query_scratchpad)
-
-                # Final results summary
+                # Display search results
                 with query_expander:
-                    st.write("**Final Search Results:**")
+                    st.write("**User's Question:**")
+                    st.code(user_prompt, language="text")
+
+                    st.write("**Generated Search Query:**")
+                    st.code(generated_query, language="sql")
+
+                    st.write("**Search Results:**")
                     if vf:
                         st.write(f"_User-Confirmed Facts ({len(vf)}):_")
                         st.json(vf[:5])
@@ -9336,9 +11651,8 @@ You can:
                         st.write(f"_Document Chunks ({len(chunks)}):_")
                         st.json(chunks[:10])
                     if not vf and not chunks:
-                        st.write("_No results found after all iterations._")
+                        st.write("_No results found._")
 
-                # Display AI Scratchpads OUTSIDE the expander
                 # Initialize scratchpad state if needed
                 if 'scratchpads' not in st.session_state:
                     st.session_state.scratchpads = {
@@ -9355,52 +11669,65 @@ You can:
                             if pad['updated_at']:
                                 st.caption(f"Updated: {pad['updated_at']}")
 
-                # Step 3: Distill (synthesize all trusted sources)
-                with st.spinner("Step 3: Distilling all retrieved data from trusted sources..."):
-                    distilled = _distill(vf, chunks, user_prompt)
-
-                with query_expander:
-                    st.write("**Distilled Key Facts:**")
-                    st.markdown(distilled or "_No relevant facts were distilled._")
+                # Step 2: Synthesize directly from retrieved data (no separate distillation step)
+                # Build comprehensive data payload for synthesis
+                data_payload = {
+                    "user_confirmed_facts": vf,
+                    "document_sources": chunks
+                }
 
                 # Merge ephemeral session uploads
+                session_context = ""
                 if st.session_state.session_rag_context:
-                    distilled = (distilled or "") + "\n\n**From Current Session Upload:**\n" + st.session_state.session_rag_context
-
-                # Step 4: Synthesize in persona voice, grounded ONLY in distilled facts
-                synthesis_system_prompt = (
-                    f"{persona_prompt_text} First, think step-by-step in a `<think>` block. "
-                    "Then, synthesize a clear answer ONLY from the provided key facts below. "
-                    "\n\n**CRITICAL RULES:**\n"
-                    "1. The key facts are from the user's private database and contain ALL relevant context\n"
-                    "2. Entities mentioned by the user refer to what exists in their database\n"
-                    "3. The database IS the full context - assume the user is asking about their specific data\n"
-                    "4. DO NOT use general knowledge or external information\n"
-                    "5. Answer directly and confidently from the provided facts\n"
-                    "6. ONLY state you cannot answer if the facts are truly empty or irrelevant\n\n"
-                    "The user is asking about their data. Provide a direct answer using their data."
-                )
-                synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts from the database:\n{distilled}"
+                    session_context = f"\n\n**From Current Session Upload:**\n{st.session_state.session_rag_context}"
 
                 # Use selected model for synthesis
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
                 model_label = "O3" if selected_model == "o3" else "GPT-4.1"
 
-                with st.spinner(f"Synthesizing final answer with {model_label}..."):
-                    # Create a placeholder in thinking_expander for real-time thinking display
-                    thinking_placeholder = thinking_expander.empty()
-                    full_response, thinking_content = _stream_synthesis(
-                        synthesis_system_prompt,
-                        synthesis_user_payload,
-                        final_answer_placeholder,
-                        thinking_placeholder
-                    )
+                # Build synthesis prompt that includes distillation logic
+                synthesis_system_prompt = (
+                    f"{persona_prompt_text}\n\n"
+                    "You are synthesizing an answer from the user's private database. Follow this workflow:\n\n"
+                    "1. **Think step-by-step** in a `<think>` block:\n"
+                    "   - Analyze the retrieved data (user-confirmed facts + document sources)\n"
+                    "   - Identify the most relevant information for the user's question\n"
+                    "   - Plan how to structure your answer\n\n"
+                    "2. **Synthesize a clear answer** following these CRITICAL RULES:\n"
+                    "   - The data below is from the user's private database and contains ALL relevant context\n"
+                    "   - Entities mentioned by the user refer to what exists in their database\n"
+                    "   - The database IS the full context - assume the user is asking about their specific data\n"
+                    "   - DO NOT use general knowledge or external information\n"
+                    "   - Answer directly and confidently from the provided data\n"
+                    "   - If user_confirmed_facts conflict with document_sources, prefer user_confirmed_facts (they may be corrections/updates)\n"
+                    "   - Cite source types when relevant (e.g., 'According to uploaded documents...' or 'User confirmed that...')\n"
+                    "   - ONLY state you cannot answer if the data is truly empty or irrelevant\n\n"
+                    "The user is asking about their data. Provide a direct answer using their data."
+                )
+
+                synthesis_user_payload = (
+                    f"USER'S QUESTION: \"{user_prompt}\"\n\n"
+                    f"RETRIEVED DATA FROM DATABASE:\n{json.dumps(data_payload, indent=2)}"
+                    f"{session_context}"
+                )
+
+                status_container.info(f"✨ Synthesizing answer with {model_label}...")
+                # Create a placeholder in thinking_expander for real-time thinking display
+                thinking_placeholder = thinking_expander.empty()
+                full_response, thinking_content = _stream_synthesis(
+                    synthesis_system_prompt,
+                    synthesis_user_payload,
+                    final_answer_placeholder,
+                    thinking_placeholder
+                )
 
                 # Display thinking content if available
                 if thinking_content:
                     thinking_placeholder.info(thinking_content)
 
-                agent_log.append("✅ Final answer synthesized.")
+                # Clear status container once answer is complete
+                status_container.empty()
+                agent_log.append("✅ Answer synthesized from database")
                 log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
                 messages.append({"role": "assistant", "content": full_response})
@@ -9410,14 +11737,14 @@ You can:
                 st.session_state.is_generating = False
 
                 # Update scratchpads after response completes
-                summary = _summarize_query_results(vf + chunks, broad_query)
+                summary = _summarize_query_results(vf + chunks, "Parallel search (targeted + broad)")
                 _update_scratchpad_sync('data_summary', summary)
 
                 # Update context analysis scratchpad
                 context = _analyze_conversation_context()
                 _update_scratchpad_sync('context_analysis', context)
 
-                st.stop()
+                # Removed st.stop() - let chat input render at bottom
 
             except Exception as e:
                 st.error(f"An error occurred in the retrieval process: {e}")
@@ -9434,58 +11761,81 @@ You can:
                 st.session_state.is_generating = True
                 try:
                     agent_log = []
-                    with st.spinner("Searching knowledge bases (fallback)..."):
-                        broad_query = _generate_broad_query_via_llm(user_prompt)
-                    agent_log.append("✅ Fallback: Query generated.")
+
+                    status_container.info("🔍 Searching knowledge bases (fallback mode)...")
+                    vf, chunks, generated_query = _search_selected_kbs_parallel(user_prompt, selected_kbs)
+                    agent_log.append(f"✅ Fallback search: {len(vf)} fact(s), {len(chunks)} chunk(s) retrieved")
                     log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
-                    with st.spinner("Querying selected knowledge bases..."):
-                        vf, chunks = _search_selected_kbs(broad_query, user_prompt)
-                    agent_log.append(f"✅ Fallback: Retrieved {len(vf)} user-confirmed fact(s), {len(chunks)} document chunk(s).")
-                    log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                    # Display search query and results
+                    with query_expander:
+                        st.write("**User's Question:**")
+                        st.code(user_prompt, language="text")
 
-                    # If we found results, proceed with distillation
+                        st.write("**Generated Search Query:**")
+                        st.code(generated_query, language="sql")
+
+                        st.write("**Search Results:**")
+                        if vf or chunks:
+                            if vf:
+                                st.write(f"_User-Confirmed Facts ({len(vf)}):_")
+                                st.json(vf[:5])
+                            if chunks:
+                                st.write(f"_Document Chunks ({len(chunks)}):_")
+                                st.json(chunks[:10])
+                        else:
+                            st.write("_No results found._")
+
+                    # If we found results, synthesize directly (no separate distillation)
                     if vf or chunks:
-                        with st.spinner("Distilling retrieved data..."):
-                            distilled = _distill(vf, chunks, user_prompt)
+                        data_payload = {
+                            "user_confirmed_facts": vf,
+                            "document_sources": chunks
+                        }
 
+                        session_context = ""
                         if st.session_state.session_rag_context:
-                            distilled = (distilled or "") + "\n\n**From Current Session Upload:**\n" + st.session_state.session_rag_context
+                            session_context = f"\n\n**From Current Session Upload:**\n{st.session_state.session_rag_context}"
 
                         synthesis_system_prompt = (
-                            f"{persona_prompt_text} First, think step-by-step in a `<think>` block. "
-                            "Then, synthesize a clear answer only from the provided key facts. "
-                            "\n\n**CRITICAL RULES:**\n"
-                            "1. The key facts are from the user's private database and contain ALL relevant context\n"
-                            "2. Entities mentioned by the user refer to what exists in their database\n"
-                            "3. The database IS the full context - assume the user is asking about their specific data\n"
-                            "4. DO NOT use general knowledge or external information\n"
-                            "5. Answer directly and confidently from the provided facts\n"
-                            "6. ONLY state you cannot answer if the facts are truly empty or irrelevant\n\n"
+                            f"{persona_prompt_text}\n\n"
+                            "You are synthesizing an answer from the user's private database. Follow this workflow:\n\n"
+                            "1. **Think step-by-step** in a `<think>` block:\n"
+                            "   - Analyze the retrieved data\n"
+                            "   - Identify relevant information for the question\n\n"
+                            "2. **Synthesize a clear answer** following these CRITICAL RULES:\n"
+                            "   - The data below is from the user's private database and contains ALL relevant context\n"
+                            "   - DO NOT use general knowledge or external information\n"
+                            "   - Answer directly and confidently from the provided data\n"
+                            "   - ONLY state you cannot answer if the data is truly empty or irrelevant\n\n"
                             "The user is asking about their data. Provide a direct answer using their data."
                         )
-                        synthesis_user_payload = f"My question was: '{user_prompt}'\n\nHere are the distilled key facts:\n{distilled}"
+                        synthesis_user_payload = (
+                            f"USER'S QUESTION: \"{user_prompt}\"\n\n"
+                            f"RETRIEVED DATA FROM DATABASE:\n{json.dumps(data_payload, indent=2)}"
+                            f"{session_context}"
+                        )
 
-                        with st.spinner("Synthesizing final answer..."):
-                            # Create a placeholder in thinking_expander for real-time thinking display
-                            thinking_placeholder = thinking_expander.empty()
-                            full_response, thinking_content = _stream_synthesis(
-                                synthesis_system_prompt,
-                                synthesis_user_payload,
-                                final_answer_placeholder,
-                                thinking_placeholder
-                            )
+                        status_container.info("✨ Synthesizing answer...")
+                        thinking_placeholder = thinking_expander.empty()
+                        full_response, thinking_content = _stream_synthesis(
+                            synthesis_system_prompt,
+                            synthesis_user_payload,
+                            final_answer_placeholder,
+                            thinking_placeholder
+                        )
 
-                        # Display thinking content if available
                         if thinking_content:
                             thinking_placeholder.info(thinking_content)
 
+                        # Clear status container once answer is complete
+                        status_container.empty()
                         messages.append({"role": "assistant", "content": full_response})
                         save_user_data(st.session_state.user_id, st.session_state.user_data)
                         st.session_state.session_rag_context = ""
                         st.session_state.rag_file_status = None
                         st.session_state.is_generating = False
-                        st.stop()
+                        # Removed st.stop() - let chat input render at bottom
                 except Exception as e:
                     logger.error(f"Fallback KB search failed: {e}")
                     st.session_state.is_generating = False
@@ -9510,7 +11860,7 @@ You can:
                 deployment = st.session_state.GPT41_DEPLOYMENT
 
             # Stream the response
-            # O3 models use max_completion_tokens instead of max_tokens and only support temperature=1
+            # O3 only supports temperature=1, GPT-4.1 uses persona temperature
             create_params = {
                 "model": deployment,
                 "messages": [
@@ -9519,11 +11869,8 @@ You can:
                 ],
                 "stream": True,
             }
-            if selected_model == "o3":
-                create_params["max_completion_tokens"] = 700
-                # O3 only supports temperature=1, so don't set it (defaults to 1)
-            else:
-                create_params["max_tokens"] = 700
+            if selected_model != "o3":
+                # O3 only supports temperature=1 (default), GPT-4.1 can be customized
                 create_params["temperature"] = temp
 
             stream = client.chat.completions.create(**create_params)
@@ -9543,7 +11890,7 @@ You can:
                     st.warning("⚠️ Response generation stopped by user.")
                     st.session_state.stop_generation = False
                     st.session_state.is_generating = False
-                    st.stop()
+                    break  # Exit loop but let chat input render
 
                 # O3 models return reasoning in a separate field
                 if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
