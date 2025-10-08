@@ -1405,7 +1405,9 @@ def load_user_data(user_id):
             "prompt": (
                 "You are a helpful assistant with access to an internal knowledge base. "
                 "Your primary function is to provide answers grounded in the data from that knowledge base. "
-                "Synthesize the retrieved information clearly and concisely. If no information is found or the retrieved facts are insufficient to answer the question, state that explicitly rather than making assumptions."
+                "Synthesize the retrieved information clearly and concisely. "
+                "If the user has previously used the Multi-Agent Team on this conversation, you may have access to previous work including OUTPUT documents, RESEARCH findings, OUTLINES, and other scratchpad data. Reference this information when relevant to the user's question. "
+                "If no information is found or the retrieved facts are insufficient to answer the question, state that explicitly rather than making assumptions."
             ),
             "type": "simple",
             "params": {"temperature": 0.7}
@@ -11092,7 +11094,10 @@ with st.sidebar:
                     is_active = chat_id == active_id
                     label = f"▶ {scratchpad_icon}{title}" if is_active else f"{scratchpad_icon}{title}"
                     if st.button(label, key=f"chat_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
-                        st.session_state.user_data["active_conversation_id"] = chat_id; st.rerun()
+                        st.session_state.user_data["active_conversation_id"] = chat_id
+                        # Restore the persona that was used for this chat
+                        st.session_state.last_persona_selected = persona_name
+                        st.rerun()
 
     # =========================== SCRATCHPAD LIVE VIEWS ===========================
     # All scratchpads displayed in main chat area with cumulative diff
@@ -12342,6 +12347,31 @@ Your next prompt will resume with all this context intact.""")
                 user_context = user_prompt
                 if st.session_state.session_rag_context:
                     user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
+
+                # Add scratchpad context if available (from multi-agent workflows on same chat)
+                if "scratchpad_manager" in st.session_state:
+                    scratchpad_context = []
+                    scratchpad_mgr = st.session_state.scratchpad_manager
+
+                    # Check each scratchpad type for content
+                    for pad_type in ["output", "research", "outline", "format", "tables", "data"]:
+                        sections = scratchpad_mgr.list_sections(pad_type)
+                        if sections:
+                            pad_content = []
+                            for section_name in sections[:5]:  # Limit to first 5 sections to avoid context bloat
+                                content = scratchpad_mgr.read_section(pad_type, section_name)
+                                if content and content.strip():
+                                    # Truncate long sections
+                                    if len(content) > 1000:
+                                        content = content[:1000] + "\n... (truncated)"
+                                    pad_content.append(f"## {section_name}\n{content}")
+
+                            if pad_content:
+                                scratchpad_context.append(f"### {pad_type.upper()} Scratchpad\n" + "\n\n".join(pad_content))
+
+                    if scratchpad_context:
+                        user_context += "\n\n--- Previous Work (from Multi-Agent Team) ---\n" + "\n\n".join(scratchpad_context)
+                        user_context += "\n\nYou can reference this previous work to answer the user's question more effectively."
 
                 # Use selected model for General Assistant
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
