@@ -10350,19 +10350,15 @@ if "user_data" not in st.session_state or st.session_state.get("user_id") != use
     st.session_state.user_data = load_user_data(user_id)
     # keep whatever was stored; new chat will be forced below
 
-# ---- force GA new chat on first page load this session ----
+# ---- Set default persona but DON'T create chat until user sends a prompt ----
 DEFAULT_PERSONA = "General Assistant"
 if "bootstrapped" not in st.session_state:
     st.session_state.bootstrapped = True
-    target = DEFAULT_PERSONA if DEFAULT_PERSONA in st.session_state.user_data["personas"] \
+
+# Ensure we have a last_persona_selected for later widgets
+if "last_persona_selected" not in st.session_state:
+    st.session_state.last_persona_selected = DEFAULT_PERSONA if DEFAULT_PERSONA in st.session_state.user_data["personas"] \
         else list(st.session_state.user_data["personas"].keys())[0]
-    st.session_state.user_data = create_new_chat(user_id, st.session_state.user_data, target)
-    st.session_state.last_persona_selected = target
-else:
-    # ensure we still have a last_persona_selected for later widgets
-    if "last_persona_selected" not in st.session_state:
-        st.session_state.last_persona_selected = DEFAULT_PERSONA if DEFAULT_PERSONA in st.session_state.user_data["personas"] \
-            else list(st.session_state.user_data["personas"].keys())[0]
 
 # helper flags
 for k in ("persona_nonce", "editing_persona", "creating_persona"):
@@ -11042,6 +11038,113 @@ with st.sidebar:
         if st.button("➕ New", use_container_width=True):
             st.session_state.creating_persona = True; st.rerun()
 
+    # ============================================================================
+    # PERSONA CREATION FORM
+    # ============================================================================
+    if st.session_state.get("creating_persona", False):
+        with st.form(key="create_persona_form"):
+            st.markdown("### Create New Persona")
+
+            new_name = st.text_input("Persona Name", placeholder="e.g., Project Manager")
+            new_prompt = st.text_area("System Prompt", height=150, placeholder="You are a helpful assistant specialized in...")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_type = st.selectbox("Type", options=["simple", "agentic", "rag"], index=0)
+            with col2:
+                new_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
+
+            if new_type == "rag":
+                new_case_history = st.text_area("Case History (optional)", height=100, placeholder="Historical case data for reference...")
+
+            col_save, col_cancel = st.columns(2)
+            with col_save:
+                submit = st.form_submit_button("✅ Create", use_container_width=True, type="primary")
+            with col_cancel:
+                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if submit:
+                if not new_name or not new_prompt:
+                    st.error("Persona name and prompt are required")
+                elif new_name in st.session_state.user_data["personas"]:
+                    st.error(f"Persona '{new_name}' already exists")
+                else:
+                    # Create new persona
+                    new_persona = {
+                        "prompt": new_prompt,
+                        "type": new_type,
+                        "params": {"temperature": new_temp}
+                    }
+                    if new_type == "rag":
+                        new_persona["case_history"] = new_case_history if new_type == "rag" else ""
+
+                    st.session_state.user_data["personas"][new_name] = new_persona
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+                    st.session_state.last_persona_selected = new_name
+                    st.session_state.creating_persona = False
+                    st.session_state.persona_nonce += 1
+                    st.success(f"✅ Created persona '{new_name}'")
+                    st.rerun()
+
+            if cancel:
+                st.session_state.creating_persona = False
+                st.rerun()
+
+    # ============================================================================
+    # PERSONA EDITING FORM
+    # ============================================================================
+    if st.session_state.get("editing_persona", False):
+        persona_to_edit = st.session_state.get("persona_to_edit", selected_persona)
+        current_persona = st.session_state.user_data["personas"].get(persona_to_edit, {})
+
+        with st.form(key="edit_persona_form"):
+            st.markdown(f"### Edit Persona: {persona_to_edit}")
+
+            edit_prompt = st.text_area("System Prompt", value=current_persona.get("prompt", ""), height=150)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                current_type = current_persona.get("type", "simple")
+                edit_type = st.selectbox("Type", options=["simple", "agentic", "rag"],
+                                        index=["simple", "agentic", "rag"].index(current_type))
+            with col2:
+                current_temp = current_persona.get("params", {}).get("temperature", 0.7)
+                edit_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=current_temp, step=0.1)
+
+            if edit_type == "rag":
+                current_case = current_persona.get("case_history", "")
+                edit_case_history = st.text_area("Case History", value=current_case, height=100)
+
+            col_save, col_cancel = st.columns(2)
+            with col_save:
+                submit = st.form_submit_button("✅ Save", use_container_width=True, type="primary")
+            with col_cancel:
+                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if submit:
+                if not edit_prompt:
+                    st.error("System prompt is required")
+                else:
+                    # Update persona
+                    updated_persona = {
+                        "prompt": edit_prompt,
+                        "type": edit_type,
+                        "params": {"temperature": edit_temp}
+                    }
+                    if edit_type == "rag":
+                        updated_persona["case_history"] = edit_case_history
+
+                    st.session_state.user_data["personas"][persona_to_edit] = updated_persona
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+                    st.session_state.editing_persona = False
+                    st.session_state.persona_nonce += 1
+                    st.success(f"✅ Updated persona '{persona_to_edit}'")
+                    st.rerun()
+
+            if cancel:
+                st.session_state.editing_persona = False
+                st.rerun()
+
     if st.button("Start New Chat with Persona", use_container_width=True):
         st.session_state.user_data = create_new_chat(st.session_state.user_id, st.session_state.user_data, selected_persona); st.rerun()
 
@@ -11097,6 +11200,8 @@ with st.sidebar:
                         st.session_state.user_data["active_conversation_id"] = chat_id
                         # Restore the persona that was used for this chat
                         st.session_state.last_persona_selected = persona_name
+                        # Set flag to auto-scroll after rendering
+                        st.session_state.should_scroll_to_bottom = True
                         st.rerun()
 
     # =========================== SCRATCHPAD LIVE VIEWS ===========================
@@ -11135,12 +11240,13 @@ if st.session_state.rag_file_status:
         st.rerun()
 
 if not active_chat_id:
-    st.info("Welcome! Start a new chat or select one from the sidebar."); st.stop()
-
-messages = st.session_state.user_data["conversations"][active_chat_id]
+    st.info("Welcome! Enter a message below to start a new chat.")
+    messages = []  # Empty messages list for new chat flow
+else:
+    messages = st.session_state.user_data["conversations"][active_chat_id]
 
 # Initialize scratchpad manager for this chat (so sidebar dropdown can always access it)
-if "scratchpad_manager" not in st.session_state or st.session_state.get("scratchpad_chat_id") != active_chat_id:
+if active_chat_id and ("scratchpad_manager" not in st.session_state or st.session_state.get("scratchpad_chat_id") != active_chat_id):
     db_path = get_scratchpad_db_path()
 
     # On Azure, try to load scratchpad DB from blob storage
@@ -11166,7 +11272,6 @@ for i, m in enumerate(messages):
                 else:
                     st.warning("Could not find a preceding user question to save.")
 
-
 # Initialize transcription state if not exists
 if "pending_transcription" not in st.session_state:
     st.session_state.pending_transcription = ""
@@ -11174,77 +11279,38 @@ if "transcription_status" not in st.session_state:
     st.session_state.transcription_status = None
 
 # ============================================================================
-# CHAT INPUT - POSITIONED AFTER CHAT MESSAGES, BEFORE MESSAGE PROCESSING
+# AUTO-SCROLL TO BOTTOM (when switching chats)
 # ============================================================================
-# This allows chat input to be visible at the bottom of chat history
 
-# Handle pending transcription first
-if st.session_state.pending_transcription:
-    # Display the transcription in an editable text area for user review
-    with st.form(key="transcription_review_form", clear_on_submit=True):
-        st.write("**Edit transcription if needed, then submit:**")
-        edited_text = st.text_area(
-            "Transcribed text:",
-            value=st.session_state.pending_transcription,
-            height=100,
-            label_visibility="collapsed"
-        )
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
-        with col2:
-            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
+if st.session_state.get("should_scroll_to_bottom", False):
+    # Auto-scroll to bottom with smooth animation
+    # Use st.components to inject JavaScript with unique timestamp
+    import time
+    st.components.v1.html(
+        f"""
+        <script>
+            (function() {{
+                // Access parent window (Streamlit main page)
+                var parentWindow = window.parent;
 
-        if submit_button and edited_text.strip():
-            messages.append({"role": "user", "content": edited_text.strip()})
-            save_user_data(st.session_state.user_id, st.session_state.user_data)
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            st.session_state.message_processed = False
-            st.rerun()
-        elif cancel_button:
-            st.session_state.pending_transcription = ""
-            st.session_state.transcription_status = None
-            st.rerun()
-else:
-    # Regular chat input
-    with st.container():
-        col_chat, col_mic = st.columns([6, 1])
+                // Scroll to top first
+                parentWindow.scrollTo(0, 0);
 
-        with col_mic:
-            if st.button("🎤", help="Record audio message", use_container_width=True, key="mic_button_main"):
-                st.session_state.show_recording = True
-                st.rerun()
-
-        with col_chat:
-            # Chat input
-            if prompt := st.chat_input("Ask anything..."):
-                messages.append({"role": "user", "content": prompt})
-                save_user_data(st.session_state.user_id, st.session_state.user_data)
-                st.session_state.message_processed = False
-                st.rerun()
-
-# Recording interface
-if st.session_state.get("show_recording", False):
-    with st.container():
-        st.info("🎤 **Recording...** Click 'Stop' when finished.")
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("⏹️ Stop Recording", use_container_width=True, type="primary"):
-                st.session_state.show_recording = False
-                # Simulate recording completion
-                if st.session_state.get("simulated_audio_bytes"):
-                    st.session_state.pending_transcription = "Transcribed text will appear here..."
-                    st.session_state.transcription_status = "success"
-                else:
-                    st.session_state.transcription_status = "empty"
-                st.rerun()
-
-        with col2:
-            if st.button("❌ Cancel", use_container_width=True):
-                st.session_state.show_recording = False
-                st.rerun()
+                // Then smoothly scroll to bottom after content loads
+                setTimeout(function() {{
+                    parentWindow.scrollTo({{
+                        top: parentWindow.document.documentElement.scrollHeight,
+                        behavior: 'smooth'
+                    }});
+                }}, 300);
+            }})();
+        </script>
+        <div style="display:none;">scroll_trigger_{time.time()}</div>
+        """,
+        height=0
+    )
+    # Clear flag after scrolling
+    st.session_state.should_scroll_to_bottom = False
 
 # ============================================================================
 # MESSAGE PROCESSING
@@ -12500,5 +12566,241 @@ Your next prompt will resume with all this context intact.""")
 # ============================================================================
 # END OF MESSAGE PROCESSING
 # ============================================================================
-# Note: Chat input is now positioned after chat messages (line ~11045)
-# This keeps it visible at the bottom of chat history
+
+# ============================================================================
+# CHAT INPUT - POSITIONED AFTER LIVE WORKFLOW
+# ============================================================================
+# This ensures chat input appears below live agent work, above persistent scratchpads
+
+# Handle pending transcription first
+if st.session_state.pending_transcription:
+    # Display the transcription in an editable text area for user review
+    with st.form(key="transcription_review_form", clear_on_submit=True):
+        st.write("**Edit transcription if needed, then submit:**")
+        edited_text = st.text_area(
+            "Transcribed text:",
+            value=st.session_state.pending_transcription,
+            height=100,
+            label_visibility="collapsed"
+        )
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            submit_button = st.form_submit_button("✅ Send", use_container_width=True)
+        with col2:
+            cancel_button = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+        if submit_button and edited_text.strip():
+            # If no active chat, create one first
+            if not active_chat_id:
+                persona_to_use = st.session_state.last_persona_selected
+                st.session_state.user_data = create_new_chat(
+                    st.session_state.user_id,
+                    st.session_state.user_data,
+                    persona_to_use
+                )
+                # Get the newly created chat_id
+                active_chat_id = st.session_state.user_data["active_conversation_id"]
+                messages = st.session_state.user_data["conversations"][active_chat_id]
+
+            messages.append({"role": "user", "content": edited_text.strip()})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.session_state.message_processed = False
+            st.rerun()
+        elif cancel_button:
+            st.session_state.pending_transcription = ""
+            st.session_state.transcription_status = None
+            st.rerun()
+else:
+    # Regular chat input
+    col_chat, col_mic = st.columns([6, 1])
+
+    with col_mic:
+        # Microphone recording with actual audio capture
+        try:
+            rec = mic_recorder(
+                start_prompt="🎤",
+                stop_prompt="⏹️",
+                just_once=True,
+                use_container_width=True,
+                key="mic_inline",
+                format="webm",
+            )
+        except TypeError:
+            rec = mic_recorder(
+                start_prompt="🎤",
+                stop_prompt="⏹️",
+                just_once=True,
+                use_container_width=True,
+                key="mic_inline"
+            )
+
+    # Handle microphone recording
+    if rec and rec.get("bytes"):
+        raw_bytes = rec["bytes"]
+
+        with st.spinner("🎤 Transcribing audio..."):
+            wav16k = ensure_16k_mono_wav(raw_bytes, ext_hint="webm")
+            if not wav16k:
+                st.error("❌ Could not prepare audio for transcription.")
+                st.session_state.transcription_status = "error"
+            else:
+                text = azure_fast_transcribe_wav_bytes(wav16k, filename="mic.webm")
+                if text.strip():
+                    st.session_state.pending_transcription = text.strip()
+                    st.session_state.transcription_status = "success"
+                    st.rerun()
+                else:
+                    st.warning("⚠️ No speech recognized. Please try again.")
+                    st.session_state.transcription_status = "empty"
+
+    with col_chat:
+        # Chat input
+        if prompt := st.chat_input("Ask anything..."):
+            # If no active chat, create one first
+            if not active_chat_id:
+                persona_to_use = st.session_state.last_persona_selected
+                st.session_state.user_data = create_new_chat(
+                    st.session_state.user_id,
+                    st.session_state.user_data,
+                    persona_to_use
+                )
+                # Get the newly created chat_id
+                active_chat_id = st.session_state.user_data["active_conversation_id"]
+                messages = st.session_state.user_data["conversations"][active_chat_id]
+
+            messages.append({"role": "user", "content": prompt})
+            save_user_data(st.session_state.user_id, st.session_state.user_data)
+            st.session_state.message_processed = False
+            st.rerun()
+
+# ============================================================================
+# PERSISTENT SCRATCHPAD VIEWERS - Below chat input
+# ============================================================================
+
+if "scratchpad_manager" in st.session_state:
+    scratchpad_mgr = st.session_state.scratchpad_manager
+
+    # Check if there's any scratchpad content to display
+    has_any_content = False
+    for pad_type in ["output", "research", "outline", "format", "tables", "data", "plots", "log"]:
+        if scratchpad_mgr.list_sections(pad_type):
+            has_any_content = True
+            break
+
+    if has_any_content:
+        st.markdown("---")
+        st.markdown("### 📋 Scratchpads")
+
+        # OUTPUT viewer
+        output_sections = scratchpad_mgr.list_sections("output")
+        if output_sections:
+            with st.expander(f"📄 OUTPUT Document ({len(output_sections)} sections)", expanded=False):
+                output_content = []
+                for section_name in output_sections:
+                    content = scratchpad_mgr.read_section("output", section_name)
+                    if content:
+                        output_content.append(f"### {section_name}\n{content}")
+                if output_content:
+                    st.markdown("\n\n".join(output_content))
+                else:
+                    st.caption("No content yet")
+
+        # RESEARCH viewer
+        research_sections = scratchpad_mgr.list_sections("research")
+        if research_sections:
+            with st.expander(f"🔬 RESEARCH ({len(research_sections)} sections)", expanded=False):
+                research_content = []
+                for section_name in research_sections:
+                    content = scratchpad_mgr.read_section("research", section_name)
+                    if content:
+                        research_content.append(f"### {section_name}\n{content}")
+                if research_content:
+                    st.markdown("\n\n".join(research_content))
+                else:
+                    st.caption("No content yet")
+
+        # OUTLINE viewer
+        outline_sections = scratchpad_mgr.list_sections("outline")
+        if outline_sections:
+            with st.expander(f"📝 OUTLINE ({len(outline_sections)} sections)", expanded=False):
+                outline_content = []
+                for section_name in outline_sections:
+                    content = scratchpad_mgr.read_section("outline", section_name)
+                    if content:
+                        outline_content.append(f"### {section_name}\n{content}")
+                if outline_content:
+                    st.markdown("\n\n".join(outline_content))
+                else:
+                    st.caption("No content yet")
+
+        # FORMAT viewer
+        format_sections = scratchpad_mgr.list_sections("format")
+        if format_sections:
+            with st.expander(f"📐 FORMAT Requirements ({len(format_sections)} sections)", expanded=False):
+                format_content = []
+                for section_name in format_sections:
+                    content = scratchpad_mgr.read_section("format", section_name)
+                    if content:
+                        format_content.append(f"### {section_name}\n{content}")
+                if format_content:
+                    st.markdown("\n\n".join(format_content))
+                else:
+                    st.caption("No content yet")
+
+        # TABLES viewer
+        tables_sections = scratchpad_mgr.list_sections("tables")
+        if tables_sections:
+            with st.expander(f"📊 TABLES ({len(tables_sections)} sections)", expanded=False):
+                tables_content = []
+                for section_name in tables_sections:
+                    content = scratchpad_mgr.read_section("tables", section_name)
+                    if content:
+                        tables_content.append(f"### {section_name}\n{content}")
+                if tables_content:
+                    st.markdown("\n\n".join(tables_content))
+                else:
+                    st.caption("No content yet")
+
+        # DATA viewer
+        data_sections = scratchpad_mgr.list_sections("data")
+        if data_sections:
+            with st.expander(f"💾 DATA ({len(data_sections)} sections)", expanded=False):
+                data_content = []
+                for section_name in data_sections:
+                    content = scratchpad_mgr.read_section("data", section_name)
+                    if content:
+                        data_content.append(f"### {section_name}\n{content}")
+                if data_content:
+                    st.markdown("\n\n".join(data_content))
+                else:
+                    st.caption("No content yet")
+
+        # PLOTS viewer
+        plots_sections = scratchpad_mgr.list_sections("plots")
+        if plots_sections:
+            with st.expander(f"📈 PLOTS ({len(plots_sections)} sections)", expanded=False):
+                plots_content = []
+                for section_name in plots_sections:
+                    content = scratchpad_mgr.read_section("plots", section_name)
+                    if content:
+                        plots_content.append(f"### {section_name}\n{content}")
+                if plots_content:
+                    st.markdown("\n\n".join(plots_content))
+                else:
+                    st.caption("No content yet")
+
+        # LOG viewer
+        log_sections = scratchpad_mgr.list_sections("log")
+        if log_sections:
+            with st.expander(f"📜 LOG ({len(log_sections)} sections)", expanded=False):
+                log_content = []
+                for section_name in log_sections:
+                    content = scratchpad_mgr.read_section("log", section_name)
+                    if content:
+                        log_content.append(f"### {section_name}\n{content}")
+                if log_content:
+                    st.markdown("\n\n".join(log_content))
+                else:
+                    st.caption("No content yet")
