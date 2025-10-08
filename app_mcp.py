@@ -1328,6 +1328,77 @@ def save_user_data(user_id, data):
         st.error(f"Failed to save user data: {e}")
 
 
+def save_scratchpad_db_to_blob(user_id: str, db_path: str):
+    """
+    Upload scratchpad SQLite database to Azure Blob Storage.
+    This ensures scratchpads persist across Azure app restarts.
+    """
+    if not user_id or not os.path.exists(db_path):
+        return
+    try:
+        blob = get_blob_service_client().get_blob_client(CONTAINER_NAME, f"{user_id}_scratchpad.db")
+        with open(db_path, "rb") as f:
+            blob.upload_blob(f, overwrite=True)
+    except Exception as e:
+        # Don't show error to user - scratchpads are supplementary
+        logger.error(f"Failed to save scratchpad DB to blob: {e}")
+
+
+def load_scratchpad_db_from_blob(user_id: str, db_path: str) -> bool:
+    """
+    Download scratchpad SQLite database from Azure Blob Storage.
+    Returns True if download successful, False otherwise.
+    """
+    if not user_id:
+        return False
+    try:
+        blob = get_blob_service_client().get_blob_client(CONTAINER_NAME, f"{user_id}_scratchpad.db")
+        with open(db_path, "wb") as f:
+            blob_data = blob.download_blob()
+            f.write(blob_data.readall())
+        return True
+    except ResourceNotFoundError:
+        # No scratchpad DB exists yet - this is fine for new users
+        return False
+    except Exception as e:
+        logger.error(f"Failed to load scratchpad DB from blob: {e}")
+        return False
+
+
+def scratchpad_has_data_for_chat(user_id: str, chat_id: str) -> bool:
+    """
+    Check if scratchpads exist for a specific chat without loading full DB.
+    Used for showing indicators in chat list.
+    """
+    try:
+        db_path = get_scratchpad_db_path()
+
+        # If on Azure and file doesn't exist locally, try to download
+        if is_running_on_azure() and not os.path.exists(db_path):
+            load_scratchpad_db_from_blob(user_id, db_path)
+
+        if not os.path.exists(db_path):
+            return False
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        session_id = f"{user_id}_{chat_id}"
+        cursor.execute("""
+            SELECT COUNT(*) FROM pads p
+            JOIN sections s ON p.pad_id = s.section_id
+            WHERE p.session_id = ? AND s.content IS NOT NULL AND s.content != ''
+        """, (session_id,))
+
+        count = cursor.fetchone()[0]
+        conn.close()
+
+        return count > 0
+    except Exception as e:
+        logger.error(f"Error checking scratchpad data: {e}")
+        return False
+
+
 def load_user_data(user_id):
     default_personas = {
         "General Assistant": {
@@ -9215,6 +9286,19 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
                 # Preserve scratchpads when user stops - they may want to continue
                 st.session_state.workflow_incomplete = True
 
+                # Save workflow state to conversation metadata
+                if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
+                    messages[0]["workflow_state"] = {
+                        "incomplete": True,
+                        "output_sections": len(scratchpad_mgr.list_sections("output")),
+                        "research_sections": len(scratchpad_mgr.list_sections("research"))
+                    }
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+
+                # Save scratchpads to Azure Blob (if on Azure)
+                if is_running_on_azure():
+                    save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
+
                 return partial_answer
 
         loop_num = i + 1
@@ -9554,6 +9638,19 @@ Your next prompt will resume from this exact point with all context and work pre
 
                 # Set flag to indicate workflow is incomplete - scratchpads should be preserved
                 st.session_state.workflow_incomplete = True
+
+                # Save workflow state to conversation metadata
+                if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
+                    messages[0]["workflow_state"] = {
+                        "incomplete": True,
+                        "output_sections": len(scratchpad_mgr.list_sections("output")),
+                        "research_sections": len(scratchpad_mgr.list_sections("research"))
+                    }
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+
+                # Save scratchpads to Azure Blob (if on Azure)
+                if is_running_on_azure():
+                    save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
 
                 # Return the continuation message but DON'T clear scratchpads
                 # Scratchpads will persist in st.session_state.scratchpad_manager
@@ -9932,6 +10029,16 @@ You have access to all scratchpad tools for reading and writing."""
                             # Clear incomplete flag on successful completion
                             st.session_state.workflow_incomplete = False
 
+                            # Clear workflow state from conversation metadata
+                            if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
+                                if "workflow_state" in messages[0]:
+                                    del messages[0]["workflow_state"]
+                                save_user_data(st.session_state.user_id, st.session_state.user_data)
+
+                            # Save final scratchpads to Azure Blob (if on Azure)
+                            if is_running_on_azure():
+                                save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
+
                             return writer_answer
 
                         # --- SUPERVISOR EARLY TERMINATION CHECK ---
@@ -9987,6 +10094,16 @@ Compile the final answer from the information above. Return ONLY the final answe
 
                                 # Clear incomplete flag on successful completion
                                 st.session_state.workflow_incomplete = False
+
+                                # Clear workflow state from conversation metadata
+                                if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
+                                    if "workflow_state" in messages[0]:
+                                        del messages[0]["workflow_state"]
+                                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+
+                                # Save final scratchpads to Azure Blob (if on Azure)
+                                if is_running_on_azure():
+                                    save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
 
                                 return final_answer
 
@@ -10967,8 +11084,13 @@ with st.sidebar:
                     title = f"({persona_name}) "
                     title_content = msgs[1]['content'] if len(msgs) > 1 else "New Chat"
                     title += title_content[:25] + "..." if len(title_content) > 25 else title_content
+
+                    # Check if this chat has scratchpads (show indicator)
+                    has_scratchpads = scratchpad_has_data_for_chat(st.session_state.get('user_id'), chat_id)
+                    scratchpad_icon = "📊 " if has_scratchpads else ""
+
                     is_active = chat_id == active_id
-                    label = f"▶ {title}" if is_active else title
+                    label = f"▶ {scratchpad_icon}{title}" if is_active else f"{scratchpad_icon}{title}"
                     if st.button(label, key=f"chat_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
                         st.session_state.user_data["active_conversation_id"] = chat_id; st.rerun()
 
@@ -11015,6 +11137,11 @@ messages = st.session_state.user_data["conversations"][active_chat_id]
 # Initialize scratchpad manager for this chat (so sidebar dropdown can always access it)
 if "scratchpad_manager" not in st.session_state or st.session_state.get("scratchpad_chat_id") != active_chat_id:
     db_path = get_scratchpad_db_path()
+
+    # On Azure, try to load scratchpad DB from blob storage
+    if is_running_on_azure():
+        load_scratchpad_db_from_blob(st.session_state.get('user_id'), db_path)
+
     session_id = f"{st.session_state.get('user_id', 'unknown')}_{active_chat_id}"
     st.session_state.scratchpad_manager = ScratchpadManager(
         db_path=db_path,
@@ -11155,7 +11282,11 @@ if should_process:
                     st.rerun()
 
         # Check if we have preserved work from previous run
-        if st.session_state.get("workflow_incomplete", False) and "scratchpad_manager" in st.session_state:
+        # Check both session_state (current session) and conversation metadata (persisted)
+        workflow_state = messages[0].get("workflow_state", {})
+        has_incomplete_workflow = st.session_state.get("workflow_incomplete", False) or workflow_state.get("incomplete", False)
+
+        if has_incomplete_workflow and "scratchpad_manager" in st.session_state:
             scratchpad_mgr_check = st.session_state.scratchpad_manager
             existing_output = scratchpad_mgr_check.list_sections("output")
             existing_research = scratchpad_mgr_check.list_sections("research")
