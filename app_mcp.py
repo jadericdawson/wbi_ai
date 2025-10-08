@@ -11753,7 +11753,8 @@ You can:
 
         # 4) Simple quick path (fallback/general conversation)
         # BUT: If containers are selected and query looks substantive, try KB search as fallback
-        if intent == "general_conversation" and selected_kbs:
+        # SKIP this for agentic personas - they handle their own workflow
+        if intent == "general_conversation" and selected_kbs and persona_type != "agentic":
             # Heuristic: if prompt has >3 non-stop words, it might be a query misclassified
             substantive_words = [w for w in re.split(r"\W+", user_prompt.lower()) if len(w) > 3]
             if len(substantive_words) >= 2:
@@ -11842,136 +11843,138 @@ You can:
                     # Continue to simple quick path below
 
         # 4b) Simple quick path (fallback/general conversation)
-        logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === No KB query triggered. Intent: {intent}, KBs: {len(selected_kbs)}")
-        st.session_state.is_generating = True
-        try:
-            _, _, system_prompt, temp = _persona()
-            user_context = user_prompt
-            if st.session_state.session_rag_context:
-                user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
+        # SKIP for agentic personas - they already completed their workflow above
+        if persona_type != "agentic":
+            logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === No KB query triggered. Intent: {intent}, KBs: {len(selected_kbs)}")
+            st.session_state.is_generating = True
+            try:
+                _, _, system_prompt, temp = _persona()
+                user_context = user_prompt
+                if st.session_state.session_rag_context:
+                    user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
 
-            # Use selected model for General Assistant
-            selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
-            if selected_model == "o3":
-                client = st.session_state.o3_client
-                deployment = st.session_state.O3_DEPLOYMENT
-            else:
-                client = st.session_state.gpt41_client
-                deployment = st.session_state.GPT41_DEPLOYMENT
-
-            # Stream the response
-            # O3 only supports temperature=1, GPT-4.1 uses persona temperature
-            create_params = {
-                "model": deployment,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_context},
-                ],
-                "stream": True,
-            }
-            if selected_model != "o3":
-                # O3 only supports temperature=1 (default), GPT-4.1 can be customized
-                create_params["temperature"] = temp
-
-            stream = client.chat.completions.create(**create_params)
-
-            parts = []
-            reasoning_parts = []
-
-            # Track whether we're inside <think> tags for GPT-4.1
-            inside_think = False
-            think_parts = []
-            answer_parts = []
-            buffer = ""
-            thinking_placeholder = thinking_expander.empty()
-
-            for chunk in stream:
-                if st.session_state.stop_generation:
-                    st.warning("⚠️ Response generation stopped by user.")
-                    st.session_state.stop_generation = False
-                    st.session_state.is_generating = False
-                    break  # Exit loop but let chat input render
-
-                # O3 models return reasoning in a separate field
-                if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
-                    if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
-                        reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
-                        thinking_placeholder.markdown("".join(reasoning_parts))
-
-                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                    token = chunk.choices[0].delta.content
-                    parts.append(token)
-
-                    # For GPT-4.1, detect and separate <think> content
-                    if selected_model != "o3":
-                        buffer += token
-
-                        # Check for <think> tag opening
-                        if "<think>" in buffer and not inside_think:
-                            before_think = buffer.split("<think>")[0]
-                            answer_parts.append(before_think)
-                            buffer = buffer.split("<think>", 1)[1]
-                            inside_think = True
-
-                        # Check for </think> tag closing
-                        if "</think>" in buffer and inside_think:
-                            think_content = buffer.split("</think>")[0]
-                            think_parts.append(think_content)
-                            buffer = buffer.split("</think>", 1)[1]
-                            inside_think = False
-
-                            # Display thinking content in real-time
-                            thinking_placeholder.markdown("".join(think_parts))
-
-                        # Accumulate content based on current state
-                        if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
-                            # We're in answer mode and buffer has no partial tags
-                            answer_parts.append(buffer)
-                            buffer = ""
-                            # Display answer in real-time (without <think> tags)
-                            final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
-                        elif inside_think and not "</think>" in buffer:
-                            # We're in think mode, accumulate thinking
-                            think_parts.append(buffer)
-                            buffer = ""
-                            # Display thinking content in real-time
-                            thinking_placeholder.markdown("".join(think_parts))
-                    else:
-                        # For O3, just display the answer
-                        final_answer_placeholder.markdown("".join(parts) + " ▌")
-
-            # Handle any remaining buffer
-            if buffer:
-                if inside_think:
-                    think_parts.append(buffer)
+                # Use selected model for General Assistant
+                selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                if selected_model == "o3":
+                    client = st.session_state.o3_client
+                    deployment = st.session_state.O3_DEPLOYMENT
                 else:
-                    answer_parts.append(buffer)
+                    client = st.session_state.gpt41_client
+                    deployment = st.session_state.GPT41_DEPLOYMENT
 
-            full_response = "".join(parts)
+                # Stream the response
+                # O3 only supports temperature=1, GPT-4.1 uses persona temperature
+                create_params = {
+                    "model": deployment,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_context},
+                    ],
+                    "stream": True,
+                }
+                if selected_model != "o3":
+                    # O3 only supports temperature=1 (default), GPT-4.1 can be customized
+                    create_params["temperature"] = temp
 
-            # Final display updates
-            if selected_model == "o3":
-                final_answer_placeholder.markdown(full_response)
-                if reasoning_parts:
-                    thinking_placeholder.info("".join(reasoning_parts))
-            else:
-                answer_only = "".join(answer_parts)
-                final_answer_placeholder.markdown(answer_only)
-                if think_parts:
-                    thinking_placeholder.info("".join(think_parts))
+                stream = client.chat.completions.create(**create_params)
 
-            messages.append({"role": "assistant", "content": full_response})
-            save_user_data(st.session_state.user_id, st.session_state.user_data)
-            st.session_state.is_generating = False
+                parts = []
+                reasoning_parts = []
 
-            # Update scratchpads periodically for general conversation
-            if persona_type != "agentic" and len(messages) % 3 == 0:  # Every 3rd message
-                context = _analyze_conversation_context()
-                _update_scratchpad_sync('context_analysis', context)
+                # Track whether we're inside <think> tags for GPT-4.1
+                inside_think = False
+                think_parts = []
+                answer_parts = []
+                buffer = ""
+                thinking_placeholder = thinking_expander.empty()
 
-        except Exception as e:
-            st.error(f"Quick mode failed: {e}")
-            st.session_state.is_generating = False
+                for chunk in stream:
+                    if st.session_state.stop_generation:
+                        st.warning("⚠️ Response generation stopped by user.")
+                        st.session_state.stop_generation = False
+                        st.session_state.is_generating = False
+                        break  # Exit loop but let chat input render
+
+                    # O3 models return reasoning in a separate field
+                    if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
+                        if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+                            reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
+                            thinking_placeholder.markdown("".join(reasoning_parts))
+
+                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                        token = chunk.choices[0].delta.content
+                        parts.append(token)
+
+                        # For GPT-4.1, detect and separate <think> content
+                        if selected_model != "o3":
+                            buffer += token
+
+                            # Check for <think> tag opening
+                            if "<think>" in buffer and not inside_think:
+                                before_think = buffer.split("<think>")[0]
+                                answer_parts.append(before_think)
+                                buffer = buffer.split("<think>", 1)[1]
+                                inside_think = True
+
+                            # Check for </think> tag closing
+                            if "</think>" in buffer and inside_think:
+                                think_content = buffer.split("</think>")[0]
+                                think_parts.append(think_content)
+                                buffer = buffer.split("</think>", 1)[1]
+                                inside_think = False
+
+                                # Display thinking content in real-time
+                                thinking_placeholder.markdown("".join(think_parts))
+
+                            # Accumulate content based on current state
+                            if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
+                                # We're in answer mode and buffer has no partial tags
+                                answer_parts.append(buffer)
+                                buffer = ""
+                                # Display answer in real-time (without <think> tags)
+                                final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
+                            elif inside_think and not "</think>" in buffer:
+                                # We're in think mode, accumulate thinking
+                                think_parts.append(buffer)
+                                buffer = ""
+                                # Display thinking content in real-time
+                                thinking_placeholder.markdown("".join(think_parts))
+                        else:
+                            # For O3, just display the answer
+                            final_answer_placeholder.markdown("".join(parts) + " ▌")
+
+                # Handle any remaining buffer
+                if buffer:
+                    if inside_think:
+                        think_parts.append(buffer)
+                    else:
+                        answer_parts.append(buffer)
+
+                full_response = "".join(parts)
+
+                # Final display updates
+                if selected_model == "o3":
+                    final_answer_placeholder.markdown(full_response)
+                    if reasoning_parts:
+                        thinking_placeholder.info("".join(reasoning_parts))
+                else:
+                    answer_only = "".join(answer_parts)
+                    final_answer_placeholder.markdown(answer_only)
+                    if think_parts:
+                        thinking_placeholder.info("".join(think_parts))
+
+                messages.append({"role": "assistant", "content": full_response})
+                save_user_data(st.session_state.user_id, st.session_state.user_data)
+                st.session_state.is_generating = False
+
+                # Update scratchpads periodically for general conversation
+                if persona_type != "agentic" and len(messages) % 3 == 0:  # Every 3rd message
+                    context = _analyze_conversation_context()
+                    _update_scratchpad_sync('context_analysis', context)
+
+            except Exception as e:
+                st.error(f"Quick mode failed: {e}")
+                st.session_state.is_generating = False
 
 # ============================================================================
 # CHAT INPUT - PLACED AT END TO STAY AT BOTTOM
