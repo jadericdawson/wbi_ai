@@ -12248,7 +12248,8 @@ Your next prompt will resume with all this context intact.""")
                     return keywords[:8]  # Limit to 8 keywords
 
                 # Agentic loop: refine query up to 3 times
-                all_results = []
+                # DON'T accumulate - replace results with more refined ones each iteration
+                best_results = []
                 current_keywords = extract_keywords(user_prompt)
                 loop_num = 0
 
@@ -12257,9 +12258,10 @@ Your next prompt will resume with all this context intact.""")
                     logger.info(f"Agentic RAG Loop {loop_num}: Keywords={current_keywords}")
 
                     # Use the same search_knowledge_base tool that multi-agent system uses
+                    # Limit to 30 results per search to avoid overwhelming the synthesis
                     search_params = {
                         "keywords": current_keywords,
-                        "rank_limit": 20
+                        "rank_limit": 30
                     }
 
                     # Execute the tool
@@ -12275,13 +12277,14 @@ Your next prompt will resume with all this context intact.""")
                     if json_match:
                         try:
                             loop_results = json.loads(json_match.group(1))
-                            all_results.extend(loop_results)
+                            # REPLACE results instead of accumulating
+                            best_results = loop_results
                         except:
                             loop_results = []
                     else:
                         loop_results = []
 
-                    agent_log.append(f"🔄 Loop {loop_num}: Found {result_count} results (Total: {len(all_results)})")
+                    agent_log.append(f"🔄 Loop {loop_num}: Found {result_count} results (Keeping: {len(best_results)})")
                     log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
                     # Display query for this loop
@@ -12297,7 +12300,7 @@ Your next prompt will resume with all this context intact.""")
                         status_container.info(f"🤔 Loop {loop_num}/{MAX_LOOPS}: Evaluating results...")
 
                         # Sample for evaluation
-                        data_sample = all_results[:10]
+                        data_sample = best_results[:10]
 
                         eval_prompt = f"""Analyze if retrieved data can answer the user's question.
 
@@ -12306,7 +12309,7 @@ USER QUESTION: "{user_prompt}"
 RETRIEVED DATA (sample):
 {json.dumps(data_sample, indent=2)}
 
-TOTAL DOCUMENTS: {len(all_results)}
+TOTAL DOCUMENTS: {len(best_results)}
 
 Respond in JSON:
 {{
@@ -12367,15 +12370,20 @@ CRITICAL RULES:
                 # Deduplicate results
                 seen_ids = set()
                 unique_results = []
-                for r in all_results:
+                for r in best_results:
                     if r.get("id") not in seen_ids:
                         seen_ids.add(r.get("id"))
                         unique_results.append(r)
 
+                # Limit results for synthesis to avoid token rate limits
+                # Keep top 25 most relevant results for synthesis
+                MAX_SYNTHESIS_DOCS = 25
+                synthesis_results = unique_results[:MAX_SYNTHESIS_DOCS]
+
                 # Display final results
                 with query_expander:
                     st.write("---")
-                    st.write(f"**Final Results: {len(unique_results)} documents**")
+                    st.write(f"**Final Results: {len(unique_results)} documents (using top {len(synthesis_results)} for synthesis)**")
                     if unique_results:
                         st.json(unique_results[:10])
                     else:
@@ -12414,7 +12422,7 @@ CRITICAL RULES:
                 synthesis_user_payload = (
                     f"USER'S QUESTION: \"{user_prompt}\"\n\n"
                     f"AGENTIC SEARCH: {loop_num} loops completed\n\n"
-                    f"RETRIEVED DOCUMENTS ({len(unique_results)} total):\n{json.dumps(unique_results, indent=2)}"
+                    f"RETRIEVED DOCUMENTS (top {len(synthesis_results)} of {len(unique_results)} total):\n{json.dumps(synthesis_results, indent=2)}"
                     f"{session_context}"
                 )
 
