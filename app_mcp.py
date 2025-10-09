@@ -12132,18 +12132,19 @@ Your next prompt will resume with all this context intact.""")
                 else:
                     answer_parts.append(buffer)
 
-            full_response = "".join(parts)
-
             # Final display updates
             if selected_model == "o3":
-                placeholder.markdown(full_response)
+                # O3 doesn't use <think> tags - full response is the answer
+                clean_response = "".join(parts)
+                placeholder.markdown(clean_response)
                 thinking_content = "".join(reasoning_parts) if reasoning_parts else None
             else:
-                answer_only = "".join(answer_parts)
-                placeholder.markdown(answer_only)
+                # GPT-4.1 uses <think> tags - extract answer without them
+                clean_response = "".join(answer_parts)
+                placeholder.markdown(clean_response)
                 thinking_content = "".join(think_parts) if think_parts else None
 
-            return full_response, thinking_content
+            return clean_response, thinking_content
 
         # ----------------------------
         # Mode selection
@@ -12445,7 +12446,7 @@ CRITICAL RULES:
                         "content": msg["content"]
                     })
 
-                full_response, thinking_content = _stream_synthesis(
+                clean_response, thinking_content = _stream_synthesis(
                     synthesis_system_prompt,
                     synthesis_user_payload,
                     final_answer_placeholder,
@@ -12463,7 +12464,8 @@ CRITICAL RULES:
                 agent_log.append(f"✅ Answer synthesized after {loop_num} loops")
                 log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
-                messages.append({"role": "assistant", "content": full_response})
+                # Save clean response (without <think> tags) to chat history
+                messages.append({"role": "assistant", "content": clean_response})
                 save_user_data(st.session_state.user_id, st.session_state.user_data)
                 st.session_state.session_rag_context = ""
                 st.session_state.rag_file_status = None
@@ -12565,7 +12567,7 @@ CRITICAL RULES:
                                 "content": msg["content"]
                             })
 
-                        full_response, thinking_content = _stream_synthesis(
+                        clean_response, thinking_content = _stream_synthesis(
                             synthesis_system_prompt,
                             synthesis_user_payload,
                             final_answer_placeholder,
@@ -12581,7 +12583,8 @@ CRITICAL RULES:
 
                         # Clear status container once answer is complete
                         status_container.empty()
-                        messages.append({"role": "assistant", "content": full_response})
+                        # Save clean response (without <think> tags) to chat history
+                        messages.append({"role": "assistant", "content": clean_response})
                         save_user_data(st.session_state.user_id, st.session_state.user_data)
                         st.session_state.session_rag_context = ""
                         st.session_state.rag_file_status = None
@@ -12747,20 +12750,22 @@ CRITICAL RULES:
                     else:
                         answer_parts.append(buffer)
 
-                full_response = "".join(parts)
-
-                # Final display updates
+                # Final display updates and save clean response
                 if selected_model == "o3":
-                    final_answer_placeholder.markdown(full_response)
+                    # O3 doesn't use <think> tags - full response is the answer
+                    clean_response = "".join(parts)
+                    final_answer_placeholder.markdown(clean_response)
                     if reasoning_parts:
                         thinking_placeholder.info("".join(reasoning_parts))
                 else:
-                    answer_only = "".join(answer_parts)
-                    final_answer_placeholder.markdown(answer_only)
+                    # GPT-4.1 uses <think> tags - extract answer without them
+                    clean_response = "".join(answer_parts)
+                    final_answer_placeholder.markdown(clean_response)
                     if think_parts:
                         thinking_placeholder.info("".join(think_parts))
 
-                messages.append({"role": "assistant", "content": full_response})
+                # Save clean response (without <think> tags) to chat history
+                messages.append({"role": "assistant", "content": clean_response})
                 save_user_data(st.session_state.user_id, st.session_state.user_data)
                 st.session_state.is_generating = False
 
