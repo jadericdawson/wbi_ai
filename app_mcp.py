@@ -12238,7 +12238,7 @@ Your next prompt will resume with all this context intact.""")
                     }
 
                     # Execute the tool
-                    tool_result = execute_tool("search_knowledge_base", search_params)
+                    tool_result = execute_tool_call("search_knowledge_base", search_params)
                     logger.info(f"Loop {loop_num} search result: {tool_result[:500]}")
 
                     # Parse results from tool observation
