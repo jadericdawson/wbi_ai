@@ -10644,6 +10644,14 @@ with st.sidebar:
                 st.session_state.editing_persona = False
                 st.rerun()
 
+    # Decorative separator between Chat Persona and Upload & Ingest sections
+    st.markdown(
+        """
+        <div style="margin: 20px 0; padding: 10px 0; border-top: 2px solid rgba(49, 51, 63, 0.2); border-bottom: 1px solid rgba(49, 51, 63, 0.1);"></div>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.markdown('<div class="mini-header">Upload & Ingest</div>', unsafe_allow_html=True)
     upload_options = [path for path in all_container_paths if 'VerifiedFacts' not in path and 'ProjectSummaries' not in path]
 
