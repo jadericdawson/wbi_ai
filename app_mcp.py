@@ -10437,15 +10437,8 @@ with st.sidebar:
         )
         st.session_state.general_assistant_model = "gpt-4.1" if selected_model_display == "GPT-4.1" else "o3"
 
-        # RAG Mode toggle
-        if 'use_rag_mode' not in st.session_state:
-            st.session_state.use_rag_mode = False
-
-        st.session_state.use_rag_mode = st.toggle(
-            "🔍 RAG Mode",
-            value=st.session_state.use_rag_mode,
-            help="Enable to query knowledge bases. Disable for general conversation."
-        )
+        # RAG Mode is now automatic based on knowledge base selection
+        # No toggle needed - if KBs selected, RAG mode is active
     else:
         # For agentic personas, show static model display
         MODEL_DISPLAY = "O3"
@@ -10460,8 +10453,198 @@ with st.sidebar:
         )
         st.rerun()
 
-    st.markdown('<div class="mini-header">Upload & Ingest</div>', unsafe_allow_html=True)
+    # Get available containers (used by both Knowledge Bases and Upload sections)
     all_container_paths = get_available_containers()
+
+    # ============================================================================
+    # KNOWLEDGE BASES TO SEARCH
+    # ============================================================================
+    st.markdown('<div class="mini-header">Knowledge Bases to Search</div>', unsafe_allow_html=True)
+    if 'selected_containers' not in st.session_state:
+        st.session_state.selected_containers = []
+
+    num_selected = len(st.session_state.selected_containers)
+    total_containers = len(all_container_paths)
+    popover_label = f"Searching {num_selected} of {total_containers} KBs"
+
+    with st.popover(popover_label, use_container_width=True):
+        st.markdown("##### Select Knowledge Bases")
+
+        # Use session state to track the working copy
+        if 'kb_working_selection' not in st.session_state:
+            st.session_state.kb_working_selection = set(st.session_state.selected_containers)
+
+        # Quick action buttons (modify working copy without rerun)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("✓ Select All", use_container_width=True, key="select_all_kbs_btn"):
+                st.session_state.kb_working_selection = set(all_container_paths)
+        with col2:
+            if st.button("✗ Deselect All", use_container_width=True, key="deselect_all_kbs_btn"):
+                st.session_state.kb_working_selection = set()
+        with col3:
+            if st.button("↻ Reset", use_container_width=True, key="reset_kbs_btn", help="Reset to applied selection"):
+                st.session_state.kb_working_selection = set(st.session_state.selected_containers)
+
+        st.divider()
+
+        # Individual checkboxes - auto-apply changes immediately
+        for container in all_container_paths:
+            is_checked = container in st.session_state.kb_working_selection
+            checked = st.checkbox(
+                container,
+                value=is_checked,
+                key=f"kb_checkbox_{container}"
+            )
+            # Update working selection AND immediately apply
+            if checked:
+                st.session_state.kb_working_selection.add(container)
+            else:
+                st.session_state.kb_working_selection.discard(container)
+
+        # Auto-apply: immediately commit working selection to selected_containers
+        st.session_state.selected_containers = list(st.session_state.kb_working_selection)
+
+        st.divider()
+        st.caption(f"✅ {len(st.session_state.selected_containers)} knowledge base(s) selected")
+
+    # ============================================================================
+    # CHAT PERSONA
+    # ============================================================================
+    st.markdown('<div class="mini-header">Chat Persona</div>', unsafe_allow_html=True)
+    personas = list(st.session_state.user_data["personas"].keys())
+    widget_key = f"persona_sel_{st.session_state.persona_nonce}"
+    current_idx = personas.index(st.session_state.last_persona_selected) if st.session_state.last_persona_selected in personas else 0
+    col_sel, col_del = st.columns([0.8, 0.2])
+    with col_sel:
+        selected_persona = st.selectbox(label="Chat Persona", label_visibility="collapsed", options=personas, index=current_idx, key=widget_key, disabled=st.session_state.editing_persona, on_change=on_persona_change, args=(widget_key,))
+    with col_del:
+        if st.button("🗑️", key="delete_persona_btn", help="Delete persona", use_container_width=True):
+            if len(personas) > 1:
+                del st.session_state.user_data["personas"][selected_persona]
+                save_user_data(st.session_state.user_id, st.session_state.user_data)
+                st.session_state.last_persona_selected = next(iter(st.session_state.user_data["personas"]))
+                st.session_state.persona_nonce += 1; st.rerun()
+            else:
+                st.warning("Cannot delete the last persona.")
+
+    e_col, n_col = st.columns(2)
+    with e_col:
+        if st.button("✏️ Edit", use_container_width=True):
+            st.session_state.persona_to_edit = selected_persona
+            st.session_state.editing_persona = True; st.rerun()
+    with n_col:
+        if st.button("➕ New", use_container_width=True):
+            st.session_state.creating_persona = True; st.rerun()
+
+    # ============================================================================
+    # PERSONA CREATION FORM
+    # ============================================================================
+    if st.session_state.get("creating_persona", False):
+        with st.form(key="create_persona_form"):
+            st.markdown("### Create New Persona")
+
+            new_name = st.text_input("Persona Name", placeholder="e.g., Project Manager")
+            new_prompt = st.text_area("System Prompt", height=150, placeholder="You are a helpful assistant specialized in...")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_type = st.selectbox("Type", options=["simple", "agentic", "rag"], index=0)
+            with col2:
+                new_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
+
+            if new_type == "rag":
+                new_case_history = st.text_area("Case History (optional)", height=100, placeholder="Historical case data for reference...")
+
+            col_save, col_cancel = st.columns(2)
+            with col_save:
+                submit = st.form_submit_button("✅ Create", use_container_width=True, type="primary")
+            with col_cancel:
+                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if submit:
+                if not new_name or not new_prompt:
+                    st.error("Persona name and prompt are required")
+                elif new_name in st.session_state.user_data["personas"]:
+                    st.error(f"Persona '{new_name}' already exists")
+                else:
+                    # Create new persona
+                    new_persona = {
+                        "prompt": new_prompt,
+                        "type": new_type,
+                        "params": {"temperature": new_temp}
+                    }
+                    if new_type == "rag":
+                        new_persona["case_history"] = new_case_history if new_type == "rag" else ""
+
+                    st.session_state.user_data["personas"][new_name] = new_persona
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+                    st.session_state.last_persona_selected = new_name
+                    st.session_state.creating_persona = False
+                    st.session_state.persona_nonce += 1
+                    st.success(f"✅ Created persona '{new_name}'")
+                    st.rerun()
+
+            if cancel:
+                st.session_state.creating_persona = False
+                st.rerun()
+
+    # ============================================================================
+    # PERSONA EDITING FORM
+    # ============================================================================
+    if st.session_state.get("editing_persona", False):
+        persona_to_edit = st.session_state.get("persona_to_edit", selected_persona)
+        current_persona = st.session_state.user_data["personas"].get(persona_to_edit, {})
+
+        with st.form(key="edit_persona_form"):
+            st.markdown(f"### Edit Persona: {persona_to_edit}")
+
+            edit_prompt = st.text_area("System Prompt", value=current_persona.get("prompt", ""), height=150)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                current_type = current_persona.get("type", "simple")
+                edit_type = st.selectbox("Type", options=["simple", "agentic", "rag"],
+                                        index=["simple", "agentic", "rag"].index(current_type))
+            with col2:
+                current_temp = current_persona.get("params", {}).get("temperature", 0.7)
+                edit_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=current_temp, step=0.1)
+
+            if edit_type == "rag":
+                current_case = current_persona.get("case_history", "")
+                edit_case_history = st.text_area("Case History", value=current_case, height=100)
+
+            col_save, col_cancel = st.columns(2)
+            with col_save:
+                submit = st.form_submit_button("✅ Save", use_container_width=True, type="primary")
+            with col_cancel:
+                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
+
+            if submit:
+                if not edit_prompt:
+                    st.error("System prompt is required")
+                else:
+                    # Update persona
+                    updated_persona = {
+                        "prompt": edit_prompt,
+                        "type": edit_type,
+                        "params": {"temperature": edit_temp}
+                    }
+                    if edit_type == "rag":
+                        updated_persona["case_history"] = edit_case_history
+
+                    st.session_state.user_data["personas"][persona_to_edit] = updated_persona
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+                    st.session_state.editing_persona = False
+                    st.session_state.persona_nonce += 1
+                    st.success(f"✅ Updated persona '{persona_to_edit}'")
+                    st.rerun()
+
+            if cancel:
+                st.session_state.editing_persona = False
+                st.rerun()
+
+    st.markdown('<div class="mini-header">Upload & Ingest</div>', unsafe_allow_html=True)
     upload_options = [path for path in all_container_paths if 'VerifiedFacts' not in path and 'ProjectSummaries' not in path]
 
     # --- Popover UI to Create or Select a Container for Upload ---
@@ -10972,191 +11155,6 @@ with st.sidebar:
             st.rerun()
 
 
-    st.markdown('<div class="mini-header">Knowledge Bases to Search</div>', unsafe_allow_html=True)
-    if 'selected_containers' not in st.session_state:
-        st.session_state.selected_containers = []
-
-    num_selected = len(st.session_state.selected_containers)
-    total_containers = len(all_container_paths)
-    popover_label = f"Searching {num_selected} of {total_containers} KBs"
-
-    with st.popover(popover_label, use_container_width=True):
-        st.markdown("##### Select Knowledge Bases")
-
-        # Use session state to track the working copy
-        if 'kb_working_selection' not in st.session_state:
-            st.session_state.kb_working_selection = set(st.session_state.selected_containers)
-
-        # Quick action buttons (modify working copy without rerun)
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("✓ Select All", use_container_width=True, key="select_all_kbs_btn"):
-                st.session_state.kb_working_selection = set(all_container_paths)
-        with col2:
-            if st.button("✗ Deselect All", use_container_width=True, key="deselect_all_kbs_btn"):
-                st.session_state.kb_working_selection = set()
-        with col3:
-            if st.button("↻ Reset", use_container_width=True, key="reset_kbs_btn", help="Reset to applied selection"):
-                st.session_state.kb_working_selection = set(st.session_state.selected_containers)
-
-        st.divider()
-
-        # Individual checkboxes - auto-apply changes immediately
-        for container in all_container_paths:
-            is_checked = container in st.session_state.kb_working_selection
-            checked = st.checkbox(
-                container,
-                value=is_checked,
-                key=f"kb_checkbox_{container}"
-            )
-            # Update working selection AND immediately apply
-            if checked:
-                st.session_state.kb_working_selection.add(container)
-            else:
-                st.session_state.kb_working_selection.discard(container)
-
-        # Auto-apply: immediately commit working selection to selected_containers
-        st.session_state.selected_containers = list(st.session_state.kb_working_selection)
-
-        st.divider()
-        st.caption(f"✅ {len(st.session_state.selected_containers)} knowledge base(s) selected")
-
-    st.markdown('<div class="mini-header">Chat Persona</div>', unsafe_allow_html=True)
-    personas = list(st.session_state.user_data["personas"].keys())
-    widget_key = f"persona_sel_{st.session_state.persona_nonce}"
-    current_idx = personas.index(st.session_state.last_persona_selected) if st.session_state.last_persona_selected in personas else 0
-    col_sel, col_del = st.columns([0.8, 0.2])
-    with col_sel:
-        selected_persona = st.selectbox(label="Chat Persona", label_visibility="collapsed", options=personas, index=current_idx, key=widget_key, disabled=st.session_state.editing_persona, on_change=on_persona_change, args=(widget_key,))
-    with col_del:
-        if st.button("🗑️", key="delete_persona_btn", help="Delete persona", use_container_width=True):
-            if len(personas) > 1:
-                del st.session_state.user_data["personas"][selected_persona]
-                save_user_data(st.session_state.user_id, st.session_state.user_data)
-                st.session_state.last_persona_selected = next(iter(st.session_state.user_data["personas"]))
-                st.session_state.persona_nonce += 1; st.rerun()
-            else:
-                st.warning("Cannot delete the last persona.")
-
-    e_col, n_col = st.columns(2)
-    with e_col:
-        if st.button("✏️ Edit", use_container_width=True):
-            st.session_state.persona_to_edit = selected_persona
-            st.session_state.editing_persona = True; st.rerun()
-    with n_col:
-        if st.button("➕ New", use_container_width=True):
-            st.session_state.creating_persona = True; st.rerun()
-
-    # ============================================================================
-    # PERSONA CREATION FORM
-    # ============================================================================
-    if st.session_state.get("creating_persona", False):
-        with st.form(key="create_persona_form"):
-            st.markdown("### Create New Persona")
-
-            new_name = st.text_input("Persona Name", placeholder="e.g., Project Manager")
-            new_prompt = st.text_area("System Prompt", height=150, placeholder="You are a helpful assistant specialized in...")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                new_type = st.selectbox("Type", options=["simple", "agentic", "rag"], index=0)
-            with col2:
-                new_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.7, step=0.1)
-
-            if new_type == "rag":
-                new_case_history = st.text_area("Case History (optional)", height=100, placeholder="Historical case data for reference...")
-
-            col_save, col_cancel = st.columns(2)
-            with col_save:
-                submit = st.form_submit_button("✅ Create", use_container_width=True, type="primary")
-            with col_cancel:
-                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
-
-            if submit:
-                if not new_name or not new_prompt:
-                    st.error("Persona name and prompt are required")
-                elif new_name in st.session_state.user_data["personas"]:
-                    st.error(f"Persona '{new_name}' already exists")
-                else:
-                    # Create new persona
-                    new_persona = {
-                        "prompt": new_prompt,
-                        "type": new_type,
-                        "params": {"temperature": new_temp}
-                    }
-                    if new_type == "rag":
-                        new_persona["case_history"] = new_case_history if new_type == "rag" else ""
-
-                    st.session_state.user_data["personas"][new_name] = new_persona
-                    save_user_data(st.session_state.user_id, st.session_state.user_data)
-                    st.session_state.last_persona_selected = new_name
-                    st.session_state.creating_persona = False
-                    st.session_state.persona_nonce += 1
-                    st.success(f"✅ Created persona '{new_name}'")
-                    st.rerun()
-
-            if cancel:
-                st.session_state.creating_persona = False
-                st.rerun()
-
-    # ============================================================================
-    # PERSONA EDITING FORM
-    # ============================================================================
-    if st.session_state.get("editing_persona", False):
-        persona_to_edit = st.session_state.get("persona_to_edit", selected_persona)
-        current_persona = st.session_state.user_data["personas"].get(persona_to_edit, {})
-
-        with st.form(key="edit_persona_form"):
-            st.markdown(f"### Edit Persona: {persona_to_edit}")
-
-            edit_prompt = st.text_area("System Prompt", value=current_persona.get("prompt", ""), height=150)
-
-            col1, col2 = st.columns(2)
-            with col1:
-                current_type = current_persona.get("type", "simple")
-                edit_type = st.selectbox("Type", options=["simple", "agentic", "rag"],
-                                        index=["simple", "agentic", "rag"].index(current_type))
-            with col2:
-                current_temp = current_persona.get("params", {}).get("temperature", 0.7)
-                edit_temp = st.slider("Temperature", min_value=0.0, max_value=1.0, value=current_temp, step=0.1)
-
-            if edit_type == "rag":
-                current_case = current_persona.get("case_history", "")
-                edit_case_history = st.text_area("Case History", value=current_case, height=100)
-
-            col_save, col_cancel = st.columns(2)
-            with col_save:
-                submit = st.form_submit_button("✅ Save", use_container_width=True, type="primary")
-            with col_cancel:
-                cancel = st.form_submit_button("❌ Cancel", use_container_width=True)
-
-            if submit:
-                if not edit_prompt:
-                    st.error("System prompt is required")
-                else:
-                    # Update persona
-                    updated_persona = {
-                        "prompt": edit_prompt,
-                        "type": edit_type,
-                        "params": {"temperature": edit_temp}
-                    }
-                    if edit_type == "rag":
-                        updated_persona["case_history"] = edit_case_history
-
-                    st.session_state.user_data["personas"][persona_to_edit] = updated_persona
-                    save_user_data(st.session_state.user_id, st.session_state.user_data)
-                    st.session_state.editing_persona = False
-                    st.session_state.persona_nonce += 1
-                    st.success(f"✅ Updated persona '{persona_to_edit}'")
-                    st.rerun()
-
-            if cancel:
-                st.session_state.editing_persona = False
-                st.rerun()
-
-    if st.button("Start New Chat with Persona", use_container_width=True):
-        st.session_state.user_data = create_new_chat(st.session_state.user_id, st.session_state.user_data, selected_persona); st.rerun()
-
     if 'chats_to_delete' not in st.session_state:
         st.session_state.chats_to_delete = []
     with st.expander("📂 Previous Chats", expanded=False):
@@ -11574,12 +11572,14 @@ Your next prompt will resume with all this context intact.""")
         def _classify_intent(prompt_text: str) -> str:
             """
             Returns: 'knowledge_base_query' | 'general_conversation'
-            Uses RAG toggle for direct control. No LLM call needed.
+            Uses knowledge base selection for automatic RAG mode detection.
+            If any KBs are selected, we're in RAG mode.
             Note: 'fact_correction' is only triggered by explicit button clicks, not automatic detection.
             """
             try:
-                # Use RAG mode toggle for direct control
-                if st.session_state.get("use_rag_mode", False):
+                # Use KB selection for automatic RAG mode
+                selected_kbs = st.session_state.get("selected_containers", [])
+                if selected_kbs:
                     return "knowledge_base_query"
                 else:
                     return "general_conversation"
@@ -12187,43 +12187,13 @@ Your next prompt will resume with all this context intact.""")
             logger.warning("RAG mode enabled but no knowledge bases selected")
 
         if intent == "knowledge_base_query" and selected_kbs:
-            logger.info(f"=== KB QUERY PATH ACTIVATED === User prompt: {user_prompt[:100]}...")
+            logger.info(f"=== AGENTIC RAG ACTIVATED === User prompt: {user_prompt[:100]}...")
             st.session_state.is_generating = True
             try:
                 agent_log = []
+                MAX_LOOPS = 3
 
-                # Update context analysis scratchpad early
-                context = _analyze_conversation_context()
-                _update_scratchpad_sync('context_analysis', context)
-
-                # Step 1: Parallel search (targeted + broad fallback executed simultaneously)
-                status_container.info("🔍 Searching knowledge bases with parallel query strategy...")
-                logger.info(f"Selected KBs: {selected_kbs}")
-                vf, chunks, generated_query = _search_selected_kbs_parallel(user_prompt, selected_kbs)
-                logger.info(f"Parallel search complete: {len(vf)} facts, {len(chunks)} chunks")
-
-                agent_log.append(f"✅ Search complete: {len(vf)} fact(s), {len(chunks)} chunk(s) retrieved")
-                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
-
-                # Display search results
-                with query_expander:
-                    st.write("**User's Question:**")
-                    st.code(user_prompt, language="text")
-
-                    st.write("**Generated Search Query:**")
-                    st.code(generated_query, language="sql")
-
-                    st.write("**Search Results:**")
-                    if vf:
-                        st.write(f"_User-Confirmed Facts ({len(vf)}):_")
-                        st.json(vf[:5])
-                    if chunks:
-                        st.write(f"_Document Chunks ({len(chunks)}):_")
-                        st.json(chunks[:10])
-                    if not vf and not chunks:
-                        st.write("_No results found._")
-
-                # Initialize scratchpad state if needed
+                # Initialize scratchpads
                 if 'scratchpads' not in st.session_state:
                     st.session_state.scratchpads = {
                         'query_history': {'title': '📋 Query History', 'content': '', 'updated_at': None},
@@ -12231,58 +12201,184 @@ Your next prompt will resume with all this context intact.""")
                         'data_summary': {'title': '💾 Data Summary', 'content': '', 'updated_at': None}
                     }
 
-                # Display scratchpads as separate expanders below the query expander
-                for key, pad in st.session_state.scratchpads.items():
-                    if pad['content']:
-                        with st.expander(pad['title'], expanded=False):
-                            st.markdown(pad['content'])
-                            if pad['updated_at']:
-                                st.caption(f"Updated: {pad['updated_at']}")
+                # Extract keywords from user question
+                def extract_keywords(text: str) -> list:
+                    """Extract meaningful keywords from text"""
+                    stop_words = {
+                        'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'has', 'he',
+                        'in', 'is', 'it', 'its', 'of', 'on', 'that', 'the', 'to', 'was', 'will', 'with',
+                        'tell', 'me', 'about', 'what', 'when', 'where', 'who', 'how', 'can', 'you', 'please',
+                        'does', 'do', 'mean'
+                    }
+                    words = [w.lower() for w in re.split(r'\W+', text) if w and len(w) > 2]
+                    keywords = [w for w in words if w not in stop_words]
+                    return keywords[:8]  # Limit to 8 keywords
 
-                # Step 2: Synthesize directly from retrieved data (no separate distillation step)
-                # Build comprehensive data payload for synthesis
-                data_payload = {
-                    "user_confirmed_facts": vf,
-                    "document_sources": chunks
-                }
+                # Agentic loop: refine query up to 3 times
+                all_results = []
+                current_keywords = extract_keywords(user_prompt)
+                loop_num = 0
 
-                # Merge ephemeral session uploads
+                for loop_num in range(1, MAX_LOOPS + 1):
+                    status_container.info(f"🔍 Loop {loop_num}/{MAX_LOOPS}: Searching knowledge bases...")
+                    logger.info(f"Agentic RAG Loop {loop_num}: Keywords={current_keywords}")
+
+                    # Use the same search_knowledge_base tool that multi-agent system uses
+                    search_params = {
+                        "keywords": current_keywords,
+                        "rank_limit": 20
+                    }
+
+                    # Execute the tool
+                    tool_result = execute_tool("search_knowledge_base", search_params)
+                    logger.info(f"Loop {loop_num} search result: {tool_result[:500]}")
+
+                    # Parse results from tool observation
+                    results_match = re.search(r'Found (\d+) result\(s\)', tool_result)
+                    result_count = int(results_match.group(1)) if results_match else 0
+
+                    # Extract JSON results if present
+                    json_match = re.search(r'Results:\n(.*)', tool_result, re.DOTALL)
+                    if json_match:
+                        try:
+                            loop_results = json.loads(json_match.group(1))
+                            all_results.extend(loop_results)
+                        except:
+                            loop_results = []
+                    else:
+                        loop_results = []
+
+                    agent_log.append(f"🔄 Loop {loop_num}: Found {result_count} results (Total: {len(all_results)})")
+                    log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+
+                    # Display query for this loop
+                    with query_expander:
+                        st.write(f"**Loop {loop_num} Keywords:**")
+                        st.code(", ".join(current_keywords), language="text")
+                        st.write(f"**Results: {result_count} documents**")
+                        if loop_results:
+                            st.json(loop_results[:3])
+
+                    # Evaluate if we have enough information
+                    if result_count > 0:
+                        status_container.info(f"🤔 Loop {loop_num}/{MAX_LOOPS}: Evaluating results...")
+
+                        # Sample for evaluation
+                        data_sample = all_results[:10]
+
+                        eval_prompt = f"""Analyze if retrieved data can answer the user's question.
+
+USER QUESTION: "{user_prompt}"
+
+RETRIEVED DATA (sample):
+{json.dumps(data_sample, indent=2)}
+
+TOTAL DOCUMENTS: {len(all_results)}
+
+Respond in JSON:
+{{
+    "can_answer": true/false,
+    "confidence": "high"/"medium"/"low",
+    "reasoning": "why you can/cannot answer",
+    "missing_keywords": ["keyword1", "keyword2"] if need more searches, else []
+}}
+
+CRITICAL RULES:
+1. The database is curated for this domain - if data exists, it IS the answer
+2. For "What is X?" questions - if X appears in the data, answer about THAT X specifically
+3. Don't hedge with "could mean many things" - use the specific data provided
+4. Only mark can_answer=false if data is truly empty or completely irrelevant"""
+
+                        eval_response = st.session_state.gpt41_client.chat.completions.create(
+                            model=st.session_state.GPT41_DEPLOYMENT,
+                            messages=[
+                                {"role": "system", "content": "You evaluate search results for completeness."},
+                                {"role": "user", "content": eval_prompt}
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0.1
+                        )
+
+                        eval_result = json.loads(eval_response.choices[0].message.content)
+                        can_answer = eval_result.get("can_answer", False)
+                        confidence = eval_result.get("confidence", "low")
+                        reasoning = eval_result.get("reasoning", "")
+
+                        agent_log.append(f"📊 Can answer: {can_answer}, Confidence: {confidence}")
+                        agent_log.append(f"💭 {reasoning[:100]}")
+                        log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+
+                        # Break if confident
+                        if can_answer and confidence in ["high", "medium"]:
+                            agent_log.append(f"✅ Sufficient data in {loop_num} loop(s)")
+                            log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                            break
+
+                        # Refine keywords if needed
+                        if loop_num < MAX_LOOPS:
+                            missing_kw = eval_result.get("missing_keywords", [])
+                            if missing_kw:
+                                current_keywords = missing_kw[:8]
+                                agent_log.append(f"🔄 Refining with: {', '.join(current_keywords)}")
+                                log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                            else:
+                                break
+                    elif loop_num < MAX_LOOPS:
+                        # No results, try broader keywords
+                        agent_log.append(f"⚠️ No results, trying broader search...")
+                        current_keywords = extract_keywords(user_prompt)[:4]  # Fewer keywords = broader
+                        log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
+                    else:
+                        break
+
+                # Deduplicate results
+                seen_ids = set()
+                unique_results = []
+                for r in all_results:
+                    if r.get("id") not in seen_ids:
+                        seen_ids.add(r.get("id"))
+                        unique_results.append(r)
+
+                # Display final results
+                with query_expander:
+                    st.write("---")
+                    st.write(f"**Final Results: {len(unique_results)} documents**")
+                    if unique_results:
+                        st.json(unique_results[:10])
+                    else:
+                        st.write("_No results found._")
+
+                # Synthesize answer
                 session_context = ""
                 if st.session_state.session_rag_context:
-                    session_context = f"\n\n**From Current Session Upload:**\n{st.session_state.session_rag_context}"
+                    session_context = f"\n\n**From Session Upload:**\n{st.session_state.session_rag_context}"
 
-                # Use selected model for synthesis
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
                 model_label = "O3" if selected_model == "o3" else "GPT-4.1"
 
-                # Build synthesis prompt that includes distillation logic
                 synthesis_system_prompt = (
                     f"{persona_prompt_text}\n\n"
-                    "You are synthesizing an answer from the user's private database. Follow this workflow:\n\n"
-                    "1. **Think step-by-step** in a `<think>` block:\n"
-                    "   - Analyze the retrieved data (user-confirmed facts + document sources)\n"
-                    "   - Identify the most relevant information for the user's question\n"
-                    "   - Plan how to structure your answer\n\n"
-                    "2. **Synthesize a clear answer** following these CRITICAL RULES:\n"
-                    "   - The data below is from the user's private database and contains ALL relevant context\n"
-                    "   - Entities mentioned by the user refer to what exists in their database\n"
-                    "   - The database IS the full context - assume the user is asking about their specific data\n"
-                    "   - DO NOT use general knowledge or external information\n"
-                    "   - Answer directly and confidently from the provided data\n"
-                    "   - If user_confirmed_facts conflict with document_sources, prefer user_confirmed_facts (they may be corrections/updates)\n"
-                    "   - Cite source types when relevant (e.g., 'According to uploaded documents...' or 'User confirmed that...')\n"
-                    "   - ONLY state you cannot answer if the data is truly empty or irrelevant\n\n"
-                    "The user is asking about their data. Provide a direct answer using their data."
+                    "You are answering from a curated database after an agentic search.\n\n"
+                    "**CRITICAL RULES:**\n"
+                    "1. The database is SPECIFICALLY CURATED for this domain\n"
+                    "2. Answer about the SPECIFIC entities in the data (e.g., 'What is SETR?' → answer about SETR in YOUR data)\n"
+                    "3. DO NOT give generic answers like 'could mean many things' - the data IS the answer\n"
+                    "4. Cite document sources when relevant (e.g., 'According to document X...')\n"
+                    "5. ONLY if data is truly empty/irrelevant, ask for:\n"
+                    "   - Specific dates, names, or identifiers\n"
+                    "   - Related topics that DO exist in database\n"
+                    "6. Answer confidently from the data provided\n\n"
+                    "Think in <think> tags, then answer."
                 )
 
                 synthesis_user_payload = (
                     f"USER'S QUESTION: \"{user_prompt}\"\n\n"
-                    f"RETRIEVED DATA FROM DATABASE:\n{json.dumps(data_payload, indent=2)}"
+                    f"AGENTIC SEARCH: {loop_num} loops completed\n\n"
+                    f"RETRIEVED DOCUMENTS ({len(unique_results)} total):\n{json.dumps(unique_results, indent=2)}"
                     f"{session_context}"
                 )
 
                 status_container.info(f"✨ Synthesizing answer with {model_label}...")
-                # Create a placeholder in thinking_expander for real-time thinking display
                 thinking_placeholder = thinking_expander.empty()
                 full_response, thinking_content = _stream_synthesis(
                     synthesis_system_prompt,
@@ -12291,13 +12387,11 @@ Your next prompt will resume with all this context intact.""")
                     thinking_placeholder
                 )
 
-                # Display thinking content if available
                 if thinking_content:
                     thinking_placeholder.info(thinking_content)
 
-                # Clear status container once answer is complete
                 status_container.empty()
-                agent_log.append("✅ Answer synthesized from database")
+                agent_log.append(f"✅ Answer synthesized after {loop_num} loops")
                 log_placeholder.markdown("\n".join(f"- {s}" for s in agent_log))
 
                 messages.append({"role": "assistant", "content": full_response})
@@ -12306,20 +12400,10 @@ Your next prompt will resume with all this context intact.""")
                 st.session_state.rag_file_status = None
                 st.session_state.is_generating = False
 
-                # Update scratchpads after response completes
-                summary = _summarize_query_results(vf + chunks, "Parallel search (targeted + broad)")
-                _update_scratchpad_sync('data_summary', summary)
-
-                # Update context analysis scratchpad
-                context = _analyze_conversation_context()
-                _update_scratchpad_sync('context_analysis', context)
-
-                # Removed st.stop() - let chat input render at bottom
-
             except Exception as e:
-                st.error(f"An error occurred in the retrieval process: {e}")
+                st.error(f"An error occurred in the agentic RAG process: {e}")
+                logger.error(f"Agentic RAG error: {e}", exc_info=True)
                 st.session_state.is_generating = False
-                # graceful fallthrough to simple quick path below
 
         # 4) Simple quick path (fallback/general conversation)
         # BUT: If containers are selected and query looks substantive, try KB search as fallback
