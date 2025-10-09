@@ -10472,14 +10472,15 @@ with st.sidebar:
         st.markdown(
             """
             <style>
-            /* Compact buttons in KB selector */
+            /* Very compact buttons in KB selector */
             div[data-testid="column"] button {
-                padding: 0.25rem 0.5rem !important;
-                font-size: 0.85rem !important;
-                min-height: 2rem !important;
+                padding: 0.15rem 0.3rem !important;
+                font-size: 0.75rem !important;
+                min-height: 1.5rem !important;
+                height: 1.5rem !important;
             }
             .kb-scroll-container {
-                max-height: 300px;
+                max-height: 200px;
                 overflow-y: auto;
                 padding-right: 10px;
             }
@@ -10488,7 +10489,7 @@ with st.sidebar:
             unsafe_allow_html=True
         )
 
-        st.markdown("**Select Knowledge Bases**")
+        st.markdown('<p style="margin: 0 0 0.25rem 0; font-weight: 600; font-size: 0.9rem;">Select Knowledge Bases</p>', unsafe_allow_html=True)
 
         # Use session state to track the working copy
         if 'kb_working_selection' not in st.session_state:
@@ -10506,7 +10507,7 @@ with st.sidebar:
             if st.button("↻ Reset", use_container_width=True, key="reset_kbs_btn", help="Reset to applied selection"):
                 st.session_state.kb_working_selection = set(st.session_state.selected_containers)
 
-        st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
+        st.markdown("<hr style='margin: 0.25rem 0;'>", unsafe_allow_html=True)
 
         # Scrollable checkbox area to prevent overflow
         st.markdown('<div class="kb-scroll-container">', unsafe_allow_html=True)
