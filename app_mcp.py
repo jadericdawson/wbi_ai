@@ -12089,38 +12089,57 @@ Your next prompt will resume with all this context intact.""")
                     if selected_model != "o3":
                         buffer += token
 
-                        # Check for <think> tag opening
-                        if "<think>" in buffer and not inside_think:
-                            before_think = buffer.split("<think>")[0]
-                            answer_parts.append(before_think)
-                            buffer = buffer.split("<think>", 1)[1]
-                            inside_think = True
-
-                        # Check for </think> tag closing
-                        if "</think>" in buffer and inside_think:
-                            think_content = buffer.split("</think>")[0]
-                            think_parts.append(think_content)
-                            buffer = buffer.split("</think>", 1)[1]
-                            inside_think = False
-
-                            # Display thinking content in real-time
-                            if thinking_placeholder:
-                                thinking_placeholder.markdown("".join(think_parts))
-
-                        # Accumulate content based on current state
-                        if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
-                            # We're in answer mode and buffer has no partial tags
-                            answer_parts.append(buffer)
-                            buffer = ""
-                            # Display answer in real-time (without <think> tags)
-                            placeholder.markdown("".join(answer_parts) + " ▌")
-                        elif inside_think and not "</think>" in buffer:
-                            # We're in think mode, accumulate thinking
-                            think_parts.append(buffer)
-                            buffer = ""
-                            # Display thinking content in real-time
-                            if thinking_placeholder:
-                                thinking_placeholder.markdown("".join(think_parts))
+                        # Process buffer to detect tag boundaries
+                        while True:
+                            if not inside_think:
+                                # Look for <think> tag
+                                if "<think>" in buffer:
+                                    # Found opening tag
+                                    before_tag = buffer.split("<think>")[0]
+                                    if before_tag:
+                                        answer_parts.append(before_tag)
+                                        # Display answer update
+                                        placeholder.markdown("".join(answer_parts) + " ▌")
+                                    buffer = buffer.split("<think>", 1)[1]
+                                    inside_think = True
+                                else:
+                                    # No tag found, check if we might have partial tag
+                                    if buffer.endswith("<") or buffer.endswith("<t") or buffer.endswith("<th") or buffer.endswith("<thi") or buffer.endswith("<thin") or buffer.endswith("<think"):
+                                        # Might be partial tag, keep in buffer
+                                        break
+                                    else:
+                                        # Safe to flush to answer
+                                        if buffer:
+                                            answer_parts.append(buffer)
+                                            placeholder.markdown("".join(answer_parts) + " ▌")
+                                            buffer = ""
+                                        break
+                            else:
+                                # Inside think tags, look for closing tag
+                                if "</think>" in buffer:
+                                    # Found closing tag
+                                    before_tag = buffer.split("</think>")[0]
+                                    if before_tag:
+                                        think_parts.append(before_tag)
+                                        # Display thinking update
+                                        if thinking_placeholder:
+                                            thinking_placeholder.markdown("".join(think_parts))
+                                    buffer = buffer.split("</think>", 1)[1]
+                                    inside_think = False
+                                    # Continue loop to process remaining buffer
+                                else:
+                                    # No closing tag yet, check for partial
+                                    if buffer.endswith("<") or buffer.endswith("</") or buffer.endswith("</t") or buffer.endswith("</th") or buffer.endswith("</thi") or buffer.endswith("</thin") or buffer.endswith("</think"):
+                                        # Might be partial closing tag, keep in buffer
+                                        break
+                                    else:
+                                        # Safe to flush to thinking
+                                        if buffer:
+                                            think_parts.append(buffer)
+                                            if thinking_placeholder:
+                                                thinking_placeholder.markdown("".join(think_parts))
+                                            buffer = ""
+                                        break
                     else:
                         # For O3, just display the answer
                         placeholder.markdown("".join(parts) + " ▌")
@@ -12721,36 +12740,57 @@ CRITICAL RULES:
                         if selected_model != "o3":
                             buffer += token
 
-                            # Check for <think> tag opening
-                            if "<think>" in buffer and not inside_think:
-                                before_think = buffer.split("<think>")[0]
-                                answer_parts.append(before_think)
-                                buffer = buffer.split("<think>", 1)[1]
-                                inside_think = True
-
-                            # Check for </think> tag closing
-                            if "</think>" in buffer and inside_think:
-                                think_content = buffer.split("</think>")[0]
-                                think_parts.append(think_content)
-                                buffer = buffer.split("</think>", 1)[1]
-                                inside_think = False
-
-                                # Display thinking content in real-time
-                                thinking_placeholder.markdown("".join(think_parts))
-
-                            # Accumulate content based on current state
-                            if not inside_think and not "<think>" in buffer and not "</think>" in buffer:
-                                # We're in answer mode and buffer has no partial tags
-                                answer_parts.append(buffer)
-                                buffer = ""
-                                # Display answer in real-time (without <think> tags)
-                                final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
-                            elif inside_think and not "</think>" in buffer:
-                                # We're in think mode, accumulate thinking
-                                think_parts.append(buffer)
-                                buffer = ""
-                                # Display thinking content in real-time
-                                thinking_placeholder.markdown("".join(think_parts))
+                            # Process buffer to detect tag boundaries
+                            while True:
+                                if not inside_think:
+                                    # Look for <think> tag
+                                    if "<think>" in buffer:
+                                        # Found opening tag
+                                        before_tag = buffer.split("<think>")[0]
+                                        if before_tag:
+                                            answer_parts.append(before_tag)
+                                            # Display answer update
+                                            final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
+                                        buffer = buffer.split("<think>", 1)[1]
+                                        inside_think = True
+                                    else:
+                                        # No tag found, check if we might have partial tag
+                                        if buffer.endswith("<") or buffer.endswith("<t") or buffer.endswith("<th") or buffer.endswith("<thi") or buffer.endswith("<thin") or buffer.endswith("<think"):
+                                            # Might be partial tag, keep in buffer
+                                            break
+                                        else:
+                                            # Safe to flush to answer
+                                            if buffer:
+                                                answer_parts.append(buffer)
+                                                final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
+                                                buffer = ""
+                                            break
+                                else:
+                                    # Inside think tags, look for closing tag
+                                    if "</think>" in buffer:
+                                        # Found closing tag
+                                        before_tag = buffer.split("</think>")[0]
+                                        if before_tag:
+                                            think_parts.append(before_tag)
+                                            # Display thinking update
+                                            if thinking_placeholder:
+                                                thinking_placeholder.markdown("".join(think_parts))
+                                        buffer = buffer.split("</think>", 1)[1]
+                                        inside_think = False
+                                        # Continue loop to process remaining buffer
+                                    else:
+                                        # No closing tag yet, check for partial
+                                        if buffer.endswith("<") or buffer.endswith("</") or buffer.endswith("</t") or buffer.endswith("</th") or buffer.endswith("</thi") or buffer.endswith("</thin") or buffer.endswith("</think"):
+                                            # Might be partial closing tag, keep in buffer
+                                            break
+                                        else:
+                                            # Safe to flush to thinking
+                                            if buffer:
+                                                think_parts.append(buffer)
+                                                if thinking_placeholder:
+                                                    thinking_placeholder.markdown("".join(think_parts))
+                                                buffer = ""
+                                            break
                         else:
                             # For O3, just display the answer
                             final_answer_placeholder.markdown("".join(parts) + " ▌")
