@@ -76,5 +76,17 @@ jobs:
         with:
           app-name: 'wbi-deepseekr1-v3'
           slot-name: 'Production'
+          startup-command: '/home/site/wwwroot/azure_startup.sh'
 
-          
+      # Post-deployment configuration
+      - name: 'Configure App Settings'
+        run: |
+          echo "Deployment complete. Ensure the following environment variables are set in Azure Portal:"
+          echo "  - COSMOS_ENDPOINT"
+          echo "  - COSMOS_KEY"
+          echo "  - AZURE_AI_SEARCH_ENDPOINT"
+          echo "  - GPT41_DEPLOYMENT"
+          echo "  - O3_DEPLOYMENT_NAME"
+          echo "  - AZURE_STORAGE_CONNECTION_STRING"
+          echo "  - ENVIRONMENT=production"
+          echo "  - SKIP_STARTUP_VERIFICATION=true (recommended for faster startup)"

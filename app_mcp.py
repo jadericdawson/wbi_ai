@@ -12521,7 +12521,8 @@ CRITICAL RULES:
 
         # 4b) Simple quick path (fallback/general conversation)
         # SKIP for agentic personas - they already completed their workflow above
-        if persona_type != "agentic":
+        # SKIP if we already handled a knowledge_base_query with RAG above
+        if persona_type != "agentic" and intent != "knowledge_base_query":
             logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === No KB query triggered. Intent: {intent}, KBs: {len(selected_kbs)}")
             st.session_state.is_generating = True
             try:
