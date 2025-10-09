@@ -12026,7 +12026,7 @@ Your next prompt will resume with all this context intact.""")
             )
             return (resp.choices[0].message.content or "").strip()
 
-        def _stream_synthesis(system_prompt: str, user_payload: str, placeholder, thinking_placeholder=None) -> tuple:
+        def _stream_synthesis(system_prompt: str, user_payload: str, placeholder, thinking_placeholder=None, conversation_history=None) -> tuple:
             """
             Streams synthesis using selected model.
             Returns: (full_response, thinking_content)
@@ -12042,13 +12042,16 @@ Your next prompt will resume with all this context intact.""")
                 client = st.session_state.gpt41_client
                 deployment = st.session_state.GPT41_DEPLOYMENT
 
+            # Build messages with optional conversation history
+            api_messages = [{"role": "system", "content": system_prompt}]
+            if conversation_history:
+                api_messages.extend(conversation_history)
+            api_messages.append({"role": "user", "content": user_payload})
+
             # O3 models use max_completion_tokens instead of max_tokens
             create_params = {
                 "model": deployment,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_payload},
-                ],
+                "messages": api_messages,
                 "stream": True,
             }
             # Note: max_tokens not set here to allow longer synthesis responses
@@ -12402,24 +12405,22 @@ CRITICAL RULES:
 
                 synthesis_system_prompt = (
                     f"{persona_prompt_text}\n\n"
-                    "You are answering from the user's private database. The documents below contain all available information.\n\n"
-                    "**CRITICAL RULES:**\n\n"
-                    "1. **USE ONLY THE PROVIDED DOCUMENTS**\n"
-                    "   - Answer based solely on the document content below\n"
-                    "   - DO NOT use your general knowledge or training data\n"
-                    "   - The database is curated for this specific domain - trust it as the authoritative source\n\n"
-                    "2. **BE SPECIFIC TO THIS DATA**\n"
-                    "   - If asked about a term/entity that appears in the documents, answer about THAT specific one\n"
-                    "   - Don't list generic possibilities from general knowledge\n"
-                    "   - Quote or paraphrase from the documents when relevant\n\n"
-                    "3. **CITE YOUR SOURCES**\n"
-                    "   - Reference document filenames when possible\n"
-                    "   - Example: 'According to [filename]...'\n\n"
-                    "4. **IF THE DATA DOESN'T CONTAIN THE ANSWER**\n"
-                    "   - Be honest: 'I don't see information about [topic] in the database.'\n"
-                    "   - Suggest related topics that DO exist in the documents\n"
-                    "   - Don't make up or infer information not in the documents\n\n"
-                    "Think in <think> tags, then answer from the documents."
+                    "You have access to the user's private database with curated documents. Use this context to answer questions.\n\n"
+                    "**GUIDELINES:**\n\n"
+                    "1. **For questions about specific topics/entities in the database:**\n"
+                    "   - Use the provided documents as your authoritative source\n"
+                    "   - If a term/entity appears in the documents, answer about THAT specific one\n"
+                    "   - Quote or cite sources when relevant (e.g., 'According to [filename]...')\n\n"
+                    "2. **For conversational questions (greetings, follow-ups, clarifications):**\n"
+                    "   - Use your judgment and the conversation context\n"
+                    "   - Be helpful and natural\n"
+                    "   - You don't need to reference the database for simple interactions\n\n"
+                    "3. **For questions about the conversation itself:**\n"
+                    "   - Use the chat history to answer (e.g., 'What did I ask about earlier?')\n\n"
+                    "4. **When the database doesn't contain relevant information:**\n"
+                    "   - Use your general knowledge to be helpful\n"
+                    "   - You can provide context or suggest what might be in the database\n\n"
+                    "Think in <think> tags, then respond naturally."
                 )
 
                 synthesis_user_payload = (
@@ -12436,11 +12437,20 @@ CRITICAL RULES:
                     st.markdown("**Reasoning:**")
                     thinking_placeholder = st.empty()
 
+                # Build conversation history for context (exclude current message)
+                conversation_history = []
+                for msg in messages[:-1]:
+                    conversation_history.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+
                 full_response, thinking_content = _stream_synthesis(
                     synthesis_system_prompt,
                     synthesis_user_payload,
                     final_answer_placeholder,
-                    thinking_placeholder
+                    thinking_placeholder,
+                    conversation_history
                 )
 
                 # Display final thinking content if available
@@ -12513,24 +12523,22 @@ CRITICAL RULES:
 
                         synthesis_system_prompt = (
                             f"{persona_prompt_text}\n\n"
-                            "You are answering from the user's private database. The documents below contain all available information.\n\n"
-                            "**CRITICAL RULES:**\n\n"
-                            "1. **USE ONLY THE PROVIDED DOCUMENTS**\n"
-                            "   - Answer based solely on the document content below\n"
-                            "   - DO NOT use your general knowledge or training data\n"
-                            "   - The database is curated for this specific domain - trust it as the authoritative source\n\n"
-                            "2. **BE SPECIFIC TO THIS DATA**\n"
-                            "   - If asked about a term/entity that appears in the documents, answer about THAT specific one\n"
-                            "   - Don't list generic possibilities from general knowledge\n"
-                            "   - Quote or paraphrase from the documents when relevant\n\n"
-                            "3. **CITE YOUR SOURCES**\n"
-                            "   - Reference document filenames when possible\n"
-                            "   - Example: 'According to [filename]...'\n\n"
-                            "4. **IF THE DATA DOESN'T CONTAIN THE ANSWER**\n"
-                            "   - Be honest: 'I don't see information about [topic] in the database.'\n"
-                            "   - Suggest related topics that DO exist in the documents\n"
-                            "   - Don't make up or infer information not in the documents\n\n"
-                            "Think in <think> tags, then answer from the documents."
+                            "You have access to the user's private database with curated documents. Use this context to answer questions.\n\n"
+                            "**GUIDELINES:**\n\n"
+                            "1. **For questions about specific topics/entities in the database:**\n"
+                            "   - Use the provided documents as your authoritative source\n"
+                            "   - If a term/entity appears in the documents, answer about THAT specific one\n"
+                            "   - Quote or cite sources when relevant (e.g., 'According to [filename]...')\n\n"
+                            "2. **For conversational questions (greetings, follow-ups, clarifications):**\n"
+                            "   - Use your judgment and the conversation context\n"
+                            "   - Be helpful and natural\n"
+                            "   - You don't need to reference the database for simple interactions\n\n"
+                            "3. **For questions about the conversation itself:**\n"
+                            "   - Use the chat history to answer (e.g., 'What did I ask about earlier?')\n\n"
+                            "4. **When the database doesn't contain relevant information:**\n"
+                            "   - Use your general knowledge to be helpful\n"
+                            "   - You can provide context or suggest what might be in the database\n\n"
+                            "Think in <think> tags, then respond naturally."
                         )
                         synthesis_user_payload = (
                             f"USER'S QUESTION: \"{user_prompt}\"\n\n"
@@ -12549,11 +12557,20 @@ CRITICAL RULES:
                             st.markdown("**Reasoning:**")
                             thinking_placeholder = st.empty()
 
+                        # Build conversation history for context (exclude current message)
+                        conversation_history = []
+                        for msg in messages[:-1]:
+                            conversation_history.append({
+                                "role": msg["role"],
+                                "content": msg["content"]
+                            })
+
                         full_response, thinking_content = _stream_synthesis(
                             synthesis_system_prompt,
                             synthesis_user_payload,
                             final_answer_placeholder,
-                            thinking_placeholder
+                            thinking_placeholder,
+                            conversation_history
                         )
 
                         # Display final thinking content if available
@@ -12583,6 +12600,16 @@ CRITICAL RULES:
             st.session_state.is_generating = True
             try:
                 _, _, system_prompt, temp = _persona()
+
+                # Build full conversation history for context
+                conversation_messages = []
+                for msg in messages[:-1]:  # Exclude the current user message (already added)
+                    conversation_messages.append({
+                        "role": msg["role"],
+                        "content": msg["content"]
+                    })
+
+                # Add current user message
                 user_context = user_prompt
                 if st.session_state.session_rag_context:
                     user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
@@ -12628,12 +12655,14 @@ CRITICAL RULES:
 
                 # Stream the response
                 # O3 only supports temperature=1, GPT-4.1 uses persona temperature
+                # Build messages with full conversation history
+                api_messages = [{"role": "system", "content": system_prompt}]
+                api_messages.extend(conversation_messages)  # Add previous conversation
+                api_messages.append({"role": "user", "content": user_context})  # Add current message
+
                 create_params = {
                     "model": deployment,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_context},
-                    ],
+                    "messages": api_messages,
                     "stream": True,
                 }
                 if selected_model != "o3":
