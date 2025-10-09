@@ -10451,6 +10451,15 @@ with st.sidebar:
         MODEL_DISPLAY = "O3"
         st.markdown(f"<div style='padding: 8px 0; color: #666;'>AI Model: {MODEL_DISPLAY}</div>", unsafe_allow_html=True)
 
+    # New Chat button
+    if st.button("New Chat", use_container_width=True, type="primary"):
+        st.session_state.user_data = create_new_chat(
+            st.session_state.user_id,
+            st.session_state.user_data,
+            st.session_state.last_persona_selected
+        )
+        st.rerun()
+
     st.markdown('<div class="mini-header">Upload & Ingest</div>', unsafe_allow_html=True)
     all_container_paths = get_available_containers()
     upload_options = [path for path in all_container_paths if 'VerifiedFacts' not in path and 'ProjectSummaries' not in path]
