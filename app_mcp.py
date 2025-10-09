@@ -12163,7 +12163,6 @@ Your next prompt will resume with all this context intact.""")
                 full_response = "".join(parts)
 
                 # Extract thinking content using regex (more reliable than streaming detection)
-                import re
                 think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
                 if think_match:
                     thinking_content = think_match.group(1).strip()
@@ -12815,7 +12814,6 @@ CRITICAL RULES:
                     full_response = "".join(parts)
 
                     # Extract thinking content using regex (more reliable than streaming detection)
-                    import re
                     think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
                     if think_match:
                         extracted_thinking = think_match.group(1).strip()
