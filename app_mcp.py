@@ -10468,7 +10468,27 @@ with st.sidebar:
     popover_label = f"Searching {num_selected} of {total_containers} KBs"
 
     with st.popover(popover_label, use_container_width=True):
-        st.markdown("##### Select Knowledge Bases")
+        # Compact styling for buttons to reduce height
+        st.markdown(
+            """
+            <style>
+            /* Compact buttons in KB selector */
+            div[data-testid="column"] button {
+                padding: 0.25rem 0.5rem !important;
+                font-size: 0.85rem !important;
+                min-height: 2rem !important;
+            }
+            .kb-scroll-container {
+                max-height: 300px;
+                overflow-y: auto;
+                padding-right: 10px;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.markdown("**Select Knowledge Bases**")
 
         # Use session state to track the working copy
         if 'kb_working_selection' not in st.session_state:
@@ -10477,31 +10497,19 @@ with st.sidebar:
         # Quick action buttons (modify working copy without rerun)
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("✓ Select All", use_container_width=True, key="select_all_kbs_btn"):
+            if st.button("✓ All", use_container_width=True, key="select_all_kbs_btn"):
                 st.session_state.kb_working_selection = set(all_container_paths)
         with col2:
-            if st.button("✗ Deselect All", use_container_width=True, key="deselect_all_kbs_btn"):
+            if st.button("✗ None", use_container_width=True, key="deselect_all_kbs_btn"):
                 st.session_state.kb_working_selection = set()
         with col3:
             if st.button("↻ Reset", use_container_width=True, key="reset_kbs_btn", help="Reset to applied selection"):
                 st.session_state.kb_working_selection = set(st.session_state.selected_containers)
 
-        st.divider()
+        st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
 
         # Scrollable checkbox area to prevent overflow
-        st.markdown(
-            """
-            <style>
-            .kb-scroll-container {
-                max-height: 400px;
-                overflow-y: auto;
-                padding-right: 10px;
-            }
-            </style>
-            <div class="kb-scroll-container">
-            """,
-            unsafe_allow_html=True
-        )
+        st.markdown('<div class="kb-scroll-container">', unsafe_allow_html=True)
 
         # Individual checkboxes - auto-apply changes immediately
         for container in all_container_paths:
