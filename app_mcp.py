@@ -12139,10 +12139,22 @@ Your next prompt will resume with all this context intact.""")
                 placeholder.markdown(clean_response)
                 thinking_content = "".join(reasoning_parts) if reasoning_parts else None
             else:
-                # GPT-4.1 uses <think> tags - extract answer without them
-                clean_response = "".join(answer_parts)
+                # GPT-4.1 uses <think> tags - extract from full response using regex
+                full_response = "".join(parts)
+
+                # Extract thinking content using regex (more reliable than streaming detection)
+                import re
+                think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
+                if think_match:
+                    thinking_content = think_match.group(1).strip()
+                    # Remove <think> tags and content from response
+                    clean_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL).strip()
+                else:
+                    thinking_content = None
+                    clean_response = full_response
+
+                # Display clean answer
                 placeholder.markdown(clean_response)
-                thinking_content = "".join(think_parts) if think_parts else None
 
             return clean_response, thinking_content
 
@@ -12758,11 +12770,23 @@ CRITICAL RULES:
                     if reasoning_parts:
                         thinking_placeholder.info("".join(reasoning_parts))
                 else:
-                    # GPT-4.1 uses <think> tags - extract answer without them
-                    clean_response = "".join(answer_parts)
+                    # GPT-4.1 uses <think> tags - extract from full response using regex
+                    full_response = "".join(parts)
+
+                    # Extract thinking content using regex (more reliable than streaming detection)
+                    import re
+                    think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
+                    if think_match:
+                        extracted_thinking = think_match.group(1).strip()
+                        # Remove <think> tags and content from response
+                        clean_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL).strip()
+                        # Display extracted thinking
+                        thinking_placeholder.info(extracted_thinking)
+                    else:
+                        clean_response = full_response
+
+                    # Display clean answer
                     final_answer_placeholder.markdown(clean_response)
-                    if think_parts:
-                        thinking_placeholder.info("".join(think_parts))
 
                 # Save clean response (without <think> tags) to chat history
                 messages.append({"role": "assistant", "content": clean_response})
