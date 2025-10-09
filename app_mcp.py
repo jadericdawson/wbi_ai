@@ -10488,6 +10488,21 @@ with st.sidebar:
 
         st.divider()
 
+        # Scrollable checkbox area to prevent overflow
+        st.markdown(
+            """
+            <style>
+            .kb-scroll-container {
+                max-height: 400px;
+                overflow-y: auto;
+                padding-right: 10px;
+            }
+            </style>
+            <div class="kb-scroll-container">
+            """,
+            unsafe_allow_html=True
+        )
+
         # Individual checkboxes - auto-apply changes immediately
         for container in all_container_paths:
             is_checked = container in st.session_state.kb_working_selection
@@ -10501,6 +10516,8 @@ with st.sidebar:
                 st.session_state.kb_working_selection.add(container)
             else:
                 st.session_state.kb_working_selection.discard(container)
+
+        st.markdown("</div>", unsafe_allow_html=True)
 
         # Auto-apply: immediately commit working selection to selected_containers
         st.session_state.selected_containers = list(st.session_state.kb_working_selection)
