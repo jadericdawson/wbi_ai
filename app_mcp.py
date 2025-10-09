@@ -12397,6 +12397,9 @@ CRITICAL RULES:
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
                 model_label = "O3" if selected_model == "o3" else "GPT-4.1"
 
+                # Display which model is being used in the thinking expander
+                thinking_expander.info(f"🤖 Using model: **{model_label}** (session state: {selected_model})")
+
                 synthesis_system_prompt = (
                     f"{persona_prompt_text}\n\n"
                     "You are answering from the user's private database. The documents below contain all available information.\n\n"
@@ -12427,7 +12430,12 @@ CRITICAL RULES:
                 )
 
                 status_container.info(f"✨ Synthesizing answer with {model_label}...")
-                thinking_placeholder = thinking_expander.empty()
+
+                # Create dedicated container for thinking content inside expander
+                with thinking_expander:
+                    st.markdown("**Reasoning:**")
+                    thinking_placeholder = st.empty()
+
                 full_response, thinking_content = _stream_synthesis(
                     synthesis_system_prompt,
                     synthesis_user_payload,
@@ -12435,8 +12443,11 @@ CRITICAL RULES:
                     thinking_placeholder
                 )
 
+                # Display final thinking content if available
                 if thinking_content:
-                    thinking_placeholder.info(thinking_content)
+                    with thinking_expander:
+                        st.markdown("**Final Reasoning:**")
+                        st.info(thinking_content)
 
                 status_container.empty()
                 agent_log.append(f"✅ Answer synthesized after {loop_num} loops")
@@ -12527,8 +12538,17 @@ CRITICAL RULES:
                             f"{session_context}"
                         )
 
-                        status_container.info("✨ Synthesizing answer...")
-                        thinking_placeholder = thinking_expander.empty()
+                        selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                        model_label = "O3" if selected_model == "o3" else "GPT-4.1"
+                        thinking_expander.info(f"🤖 Using model: **{model_label}** (fallback RAG)")
+
+                        status_container.info(f"✨ Synthesizing answer with {model_label}...")
+
+                        # Create dedicated container for thinking content inside expander
+                        with thinking_expander:
+                            st.markdown("**Reasoning:**")
+                            thinking_placeholder = st.empty()
+
                         full_response, thinking_content = _stream_synthesis(
                             synthesis_system_prompt,
                             synthesis_user_payload,
@@ -12536,8 +12556,11 @@ CRITICAL RULES:
                             thinking_placeholder
                         )
 
+                        # Display final thinking content if available
                         if thinking_content:
-                            thinking_placeholder.info(thinking_content)
+                            with thinking_expander:
+                                st.markdown("**Final Reasoning:**")
+                                st.info(thinking_content)
 
                         # Clear status container once answer is complete
                         status_container.empty()
@@ -12591,6 +12614,11 @@ CRITICAL RULES:
 
                 # Use selected model for General Assistant
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                model_label = "O3" if selected_model == "o3" else "GPT-4.1"
+
+                # Display which model is being used
+                thinking_expander.info(f"🤖 Using model: **{model_label}** (simple chat)")
+
                 if selected_model == "o3":
                     client = st.session_state.o3_client
                     deployment = st.session_state.O3_DEPLOYMENT
@@ -12622,7 +12650,11 @@ CRITICAL RULES:
                 think_parts = []
                 answer_parts = []
                 buffer = ""
-                thinking_placeholder = thinking_expander.empty()
+
+                # Create dedicated container for thinking content inside expander
+                with thinking_expander:
+                    st.markdown("**Reasoning:**")
+                    thinking_placeholder = st.empty()
 
                 for chunk in stream:
                     if st.session_state.stop_generation:
