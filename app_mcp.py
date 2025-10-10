@@ -11454,7 +11454,7 @@ Your next prompt will resume with all this context intact.""")
         # Only show scratchpads for agentic personas (multi-agent workflows)
         # General Assistant and simple personas don't need these
 
-        persona_type = st.session_state.user_data["personas"].get(selected_persona, {}).get("type", "simple")
+        persona_type = st.session_state.user_data["personas"].get(active_persona, {}).get("type", "simple")
 
         if persona_type == "agentic":
             # OUTPUT viewer (Final Document)
