@@ -492,13 +492,31 @@ def get_cached_search_results(keywords: List[str] = None) -> str:
         cached_data = cache[latest_key]
         results = cached_data["results"]
 
-        return f"Cached search results for {keywords}:\n\n{cached_data['summary']}\n\nResults:\n{json.dumps(results, indent=2)}"
+        # Include search strategies info if available
+        strategy_info = ""
+        if "search_strategies" in cached_data and cached_data["search_strategies"]:
+            strategy_info = f"\n**Search strategies used:** {', '.join(cached_data['search_strategies'])}"
+
+        semantic_info = ""
+        if "semantic_query_text" in cached_data and cached_data["semantic_query_text"]:
+            semantic_info = f"\n**Semantic query:** {cached_data['semantic_query_text']}"
+
+        return f"Cached search results for {keywords}:\n\n{cached_data['summary']}{strategy_info}{semantic_info}\n\nResults:\n{json.dumps(results, indent=2)}"
 
     else:
         # Return summary of all cached searches
         summary = "## Cached Search Results from Previous Loops\n\n"
         for idx, (cache_key, data) in enumerate(cache.items(), 1):
             summary += f"{idx}. **Keywords:** {data['keywords']} (Limit: {data['rank_limit']})\n"
+
+            # Show semantic query if available
+            if "semantic_query_text" in data and data["semantic_query_text"]:
+                summary += f"   - **Semantic query:** {data['semantic_query_text']}\n"
+
+            # Show search strategies used
+            if "search_strategies" in data and data["search_strategies"]:
+                summary += f"   - **Strategies:** {', '.join(data['search_strategies'])}\n"
+
             summary += f"   - {data['summary']}\n"
             summary += f"   - Cached at: {data['timestamp']}\n"
             summary += f"   - Cache key for retrieval: Use keywords {data['keywords']}\n\n"
@@ -1553,8 +1571,19 @@ def create_new_chat(user_id, user_data, persona_name):
     sys_prompt = persona["prompt"]
     if persona.get("type") == "rag" and persona.get("case_history"):
         sys_prompt += f"\n\n--- CASE HISTORY ---\n{persona['case_history']}"
+
+    # Store chat settings in system message metadata for persistence across refreshes
     user_data["conversations"][chat_id] = [
-        {"role": "system", "content": sys_prompt, "persona_name": persona_name}
+        {
+            "role": "system",
+            "content": sys_prompt,
+            "persona_name": persona_name,
+            "chat_settings": {
+                "selected_containers": st.session_state.get("selected_containers", []),
+                "upload_target": st.session_state.get("upload_target", ""),
+                "ingest_to_cosmos": st.session_state.get("ingest_to_cosmos", False)
+            }
+        }
     ]
     user_data["active_conversation_id"] = chat_id
     save_user_data(user_id, user_data)
@@ -1570,6 +1599,58 @@ def create_new_chat(user_id, user_data, persona_name):
         st.session_state.workflow_incomplete = False
 
     return user_data
+
+
+def update_chat_settings(user_id, user_data, chat_id):
+    """
+    Update the chat settings in the system message metadata.
+    Called whenever KB selection, upload target, or ingest settings change.
+    """
+    if chat_id not in user_data["conversations"]:
+        return
+
+    # Get system message (first message)
+    system_msg = user_data["conversations"][chat_id][0]
+
+    # Update or create chat_settings
+    if "chat_settings" not in system_msg:
+        system_msg["chat_settings"] = {}
+
+    system_msg["chat_settings"]["selected_containers"] = st.session_state.get("selected_containers", [])
+    system_msg["chat_settings"]["upload_target"] = st.session_state.get("upload_target", "")
+    system_msg["chat_settings"]["ingest_to_cosmos"] = st.session_state.get("ingest_to_cosmos", False)
+
+    # Save to blob storage
+    save_user_data(user_id, user_data)
+
+
+def restore_chat_settings(chat_id, user_data):
+    """
+    Restore chat settings from conversation metadata to session state.
+    Called on page load and when switching chats.
+    """
+    if chat_id not in user_data["conversations"]:
+        return
+
+    # Get system message (first message)
+    system_msg = user_data["conversations"][chat_id][0]
+
+    # Restore persona
+    persona_name = system_msg.get("persona_name")
+    if persona_name and persona_name in user_data["personas"]:
+        st.session_state.last_persona_selected = persona_name
+
+    # Restore chat settings if they exist
+    chat_settings = system_msg.get("chat_settings", {})
+
+    # Restore KB selection
+    selected_containers = chat_settings.get("selected_containers", [])
+    st.session_state.selected_containers = selected_containers
+    st.session_state.kb_working_selection = set(selected_containers)
+
+    # Restore upload settings
+    st.session_state.upload_target = chat_settings.get("upload_target", "")
+    st.session_state.ingest_to_cosmos = chat_settings.get("ingest_to_cosmos", False)
 
 
 # =========================== COSMOS DB UPLOADER ===========================
@@ -1829,17 +1910,106 @@ class CosmosUploader:
         else:
             self.partition_key_field = "/id"
 
+    @staticmethod
+    def sanitize_for_cosmos(obj):
+        """
+        Recursively clean data for Cosmos DB by removing NaN, Infinity, and other invalid values.
+        Cosmos DB rejects documents with NaN or Infinity in JSON.
+        Also handles datetime, numpy types, and other non-JSON-serializable objects.
+        """
+        import math
+        import datetime
+        import numpy as np
+
+        if isinstance(obj, dict):
+            return {k: CosmosManager.sanitize_for_cosmos(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [CosmosManager.sanitize_for_cosmos(item) for item in obj]
+        elif isinstance(obj, float):
+            if math.isnan(obj) or math.isinf(obj):
+                return None  # Replace NaN/Infinity with None
+            return obj
+        elif isinstance(obj, (np.integer, np.floating)):
+            # Convert numpy types to Python native types
+            val = obj.item()
+            if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+                return None
+            return val
+        elif isinstance(obj, np.ndarray):
+            # Convert numpy arrays to lists
+            return [CosmosManager.sanitize_for_cosmos(item) for item in obj.tolist()]
+        elif isinstance(obj, (datetime.datetime, datetime.date)):
+            # Convert datetime to ISO format string
+            return obj.isoformat()
+        elif isinstance(obj, datetime.time):
+            return obj.isoformat()
+        elif isinstance(obj, bytes):
+            # Convert bytes to string (base64 if needed)
+            try:
+                return obj.decode('utf-8')
+            except:
+                import base64
+                return base64.b64encode(obj).decode('utf-8')
+        elif obj is None:
+            return None
+        else:
+            return obj
+
     def upload_chunks(self, chunks: List[Dict[str, Any]]) -> Tuple[int, int]:
+        import json
         success_count, failure_count = 0, 0
         for chunk in chunks:
             try:
-                self.container.upsert_item(body=chunk)
+                # Sanitize chunk to remove NaN/Infinity values before uploading
+                clean_chunk = self.sanitize_for_cosmos(chunk)
+
+                # Check document size (Cosmos DB has 2MB limit)
+                chunk_json = json.dumps(clean_chunk)
+                size_bytes = len(chunk_json.encode('utf-8'))
+                size_mb = size_bytes / (1024 * 1024)
+
+                if size_mb > 1.9:  # Leave some buffer below 2MB limit
+                    logger.warning(f"Chunk {chunk.get('id')} is {size_mb:.2f}MB (near 2MB limit)")
+                    st.warning(f"⚠️ Chunk {chunk.get('id')} is large ({size_mb:.2f}MB) - may cause issues")
+
+                self.container.upsert_item(body=clean_chunk)
                 success_count += 1
             except exceptions.CosmosHttpResponseError as e:
+                # Enhanced error logging for Cosmos DB errors
+                error_details = {
+                    "chunk_id": chunk.get('id'),
+                    "status_code": e.status_code,
+                    "reason": e.reason,
+                    "message": str(e),
+                    "sub_status": getattr(e, 'sub_status', None)
+                }
+
                 st.error(f"Failed to upsert chunk id '{chunk.get('id')}': {e.reason}")
+
+                # Log full error details
+                logger.error(f"Cosmos upsert failed: {json.dumps(error_details, indent=2)}")
+
+                # Try to identify specific issue
+                if size_mb > 1.9:
+                    logger.error(f"Chunk size: {size_mb:.2f}MB (likely too large)")
+                    st.error(f"📏 Chunk may be too large: {size_mb:.2f}MB")
+
+                # Log a sample of the problematic chunk for debugging
+                try:
+                    chunk_preview = {
+                        "id": clean_chunk.get("id"),
+                        "content_length": len(clean_chunk.get("content", "")),
+                        "keys": list(clean_chunk.keys()),
+                        "size_bytes": size_bytes
+                    }
+                    logger.error(f"Problematic chunk preview: {json.dumps(chunk_preview, indent=2)}")
+                except:
+                    pass
+
                 failure_count += 1
             except Exception as e:
                 st.error(f"Unexpected error during upsert: {e}")
+                logger.error(f"Unexpected error upserting chunk {chunk.get('id')}: {str(e)}")
                 failure_count += 1
         return success_count, failure_count
 
@@ -2561,14 +2731,29 @@ def process_docx_with_agents(file_bytes: bytes, filename: str) -> Dict[str, Any]
         # Extract all paragraphs
         paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
 
-        if not paragraphs:
-            st.warning(f"⚠️ No text content found in {filename}")
+        # Also extract text from tables
+        table_texts = []
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    if cell_text:
+                        table_texts.append(cell_text)
+
+        # Combine paragraphs and table content
+        all_text = paragraphs + table_texts
+
+        if not all_text:
+            st.warning(f"⚠️ No text content found in {filename} (checked {len(doc.paragraphs)} paragraphs and {len(doc.tables)} tables)")
             return {
                 "chunks": [],
                 "chunk_metadata_list": [],
                 "document_metadata": {},
-                "metadata": {"error": "No content extracted"}
+                "metadata": {"error": "No content extracted", "paragraphs_found": len(doc.paragraphs), "tables_found": len(doc.tables)}
             }
+
+        # Use combined text as paragraphs
+        paragraphs = all_text
 
         # Progress tracking
         progress_bar = st.progress(0.0, text=f"📄 Processing {filename}...")
@@ -4713,6 +4898,11 @@ def process_xlsx_with_agents(file_bytes: bytes, filename: str, cosmos_manager=No
 
             df = pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name)
 
+            # Skip empty sheets
+            if df.empty or len(df.columns) == 0:
+                st.warning(f"⚠️ Skipping empty sheet '{sheet_name}' in '{filename}'")
+                continue
+
             # Create sheet overview
             overview = f"""**Sheet: {sheet_name}**
 
@@ -5755,6 +5945,7 @@ class ScratchpadManager:
     - tables: Formatted tables (markdown)
     - plots: Plot specifications and data
     - outline: Initial plan, structure, TODOs
+    - format: Submission format requirements (page limits, fonts, sections, required structure)
     - data: Structured data (JSON, lists)
     - log: Agent actions and decisions (workflow history)
 
@@ -6118,6 +6309,69 @@ class ScratchpadManager:
         conn.close()
         return summary
 
+    def delete_session_scratchpads(self, session_id: str) -> bool:
+        """
+        Delete all scratchpads for a specific session (chat).
+        Used when user deletes a chat to clean up orphaned scratchpad data.
+
+        Args:
+            session_id: The session ID to delete (format: {user_id}_{chat_id})
+
+        Returns:
+            True if deletion successful, False otherwise
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Get all pad_ids for this session
+            cursor.execute("SELECT pad_id FROM pads WHERE session_id = ?", (session_id,))
+            pad_ids = [row[0] for row in cursor.fetchall()]
+
+            if not pad_ids:
+                conn.close()
+                return True  # Nothing to delete
+
+            # Delete version history for all sections in these pads
+            for pad_id in pad_ids:
+                cursor.execute("""
+                    DELETE FROM version_history
+                    WHERE section_id IN (
+                        SELECT section_id FROM sections WHERE pad_id = ?
+                    )
+                """, (pad_id,))
+
+            # Delete sections for these pads
+            for pad_id in pad_ids:
+                cursor.execute("DELETE FROM sections WHERE pad_id = ?", (pad_id,))
+
+            # Delete pads for this session
+            cursor.execute("DELETE FROM pads WHERE session_id = ?", (session_id,))
+
+            conn.commit()
+            conn.close()
+
+            logger.info(f"Deleted scratchpads for session {session_id}: {len(pad_ids)} pads removed")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete scratchpads for session {session_id}: {e}")
+            return False
+
+    def vacuum_database(self):
+        """
+        Compact database to reclaim space from deleted data.
+        Should be called periodically or after bulk deletions.
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute("VACUUM")
+            conn.commit()
+            conn.close()
+            logger.info("Database vacuumed successfully")
+        except Exception as e:
+            logger.error(f"Failed to vacuum database: {e}")
+
     def get_version_history(self, pad_name: str, section_name: str, limit: int = 10) -> list:
         """Get version history for a section with diffs"""
         section_id = self._get_section_id(pad_name, section_name)
@@ -6455,9 +6709,9 @@ AVAILABLE TOOLS:
 
 **Data & Search:**
 - get_database_schema(): **FIRST ACTION BEFORE SEARCHING** - Discovers available fields/keys in selected knowledge base containers. Returns JSON with container names, available fields, and example query syntax. **MANDATORY to call before constructing search queries to ensure you use valid field names.**
-- search_knowledge_base(keywords: list[str], semantic_query_text: str, rank_limit: int): Executes a **broad keyword search** against the knowledge base (RAG). **Keywords are combined with OR logic.** Use this to find documents or data points. Results are automatically cached for later retrieval.
+- search_knowledge_base(keywords: list[str], semantic_query_text: str, rank_limit: int): **HYBRID SEARCH** with 3 parallel strategies: (1) Exact phrase matching from semantic_query_text (highest priority), (2) Broad keyword OR search, (3) Semantic field-weighted search. Results are scored, deduplicated, and ranked by relevance. **Keywords** are individual terms (e.g., ["project", "timeline", "stakeholders"]). **semantic_query_text** is a natural language query (e.g., "project timeline and stakeholders"). Both parameters work together for best results. Results are automatically cached for later retrieval with search strategy details.
 - execute_custom_sql_query(sql_query: str, max_results: int = 100): **ADVANCED RESEARCH TOOL** - Execute custom SQL queries against knowledge base using schema information. Use for complex filtering, aggregations, field-specific searches, or when keyword search is insufficient. **ONLY SELECT queries allowed.** Supports Cosmos DB SQL syntax including: nested field access (c.metadata.entities.persons), array operations (ARRAY_CONTAINS, ARRAY_LENGTH), aggregations (COUNT, GROUP BY), complex WHERE clauses. **THINKING STEP REQUIRED:** Before calling, write query plan in scratchpad_write to LOG pad explaining: (1) what information you're seeking, (2) which schema fields you'll use, (3) query logic/filters.
-- get_cached_search_results(keywords: list[str] = None): Retrieve search results from previous loops. If keywords specified, returns that specific search. If no keywords, returns summary of all cached searches. **USE THIS to access results from searches done in earlier loops.**
+- get_cached_search_results(keywords: list[str] = None): Retrieve search results from previous loops with hybrid search metadata (strategies used, semantic queries, scores). If keywords specified, returns that specific search. If no keywords, returns summary of all cached searches including which search strategies were used. **USE THIS to access results from searches done in earlier loops.**
 - enrich_cosmos_document(document_id: str, enrichment_data: dict, container_path: str = None): **DATA ENRICHMENT TOOL** - Add structured/parsed data back to the source Cosmos DB document. Use when you retrieve a document with unstructured/stringified content, parse it into structured fields, and want to inject the parsed data back into the same document for future retrievals. Example: Document has "original_opportunity" with stringified JSON → You parse it → Call enrich_cosmos_document to add "parsed_opportunity" field with structured dict. Next retrieval will have both original AND parsed fields. **Preserves original fields** - enrichment_data is merged, not replaced.
 
 **Math & Conversion:**
@@ -6538,18 +6792,111 @@ AGENT_PERSONAS = {
         "Orchestrator": """You are an expert project manager and orchestrator. Your role is to understand the user's goal and guide your team of specialist agents to achieve it.
 
     Your team consists of autonomous specialists who make their own decisions:
-    - Tool Agent: Research specialist. Searches knowledge base, judges relevance, saves findings to appropriate scratchpads. Can request more data from other agents if needed.
-    - Query Refiner: Search strategist. Analyzes poor search results and designs better queries. Only use when searches clearly failed.
-    - Engineer: Data analyst. Creates tables, charts, data visualizations. Analyzes structured data. Calls Tool Agent for more data if needed. Saves work to TABLES/DATA/PLOTS pads.
-    - Writer: Content creator. Reads RESEARCH/TABLES/DATA, writes narrative prose to OUTPUT pad. Identifies gaps in research and requests Tool Agent search for missing information. Builds content incrementally.
+    - Research Agent: **PRIMARY SEARCH SPECIALIST**. Formulates sophisticated search strategies based on high-level goals. Designs keywords, semantic queries, and multi-angle searches. Executes searches and extracts findings to RESEARCH pad. Cosmos DB queries are cheap - can run 5-10+ searches per research need. Refines searches based on results.
+    - Tool Agent: Tool executor. Executes specific tool calls (schema discovery, SQL queries, calculations). NOT for search formulation - delegate complex searches to Research Agent instead.
+    - Query Refiner: Search rescue specialist. Only use when Research Agent's searches clearly failed. Analyzes failures and redesigns search strategy.
+    - Engineer: Data analyst. Creates tables, charts, data visualizations. Analyzes structured data. Requests Research Agent to find more data if needed. Saves work to TABLES/DATA/PLOTS pads.
+    - Writer: Content creator. Reads RESEARCH/TABLES/DATA, writes narrative prose to OUTPUT pad. Identifies gaps in research and requests Research Agent search for missing information. Builds content incrementally.
     - Editor: Content refiner. Improves existing OUTPUT sections based on feedback. Edits for clarity, completeness, tone. Can request more research if needed.
     - Validator: Quality checker. Reviews OUTPUT against RESEARCH for accuracy and completeness. Identifies fabrications or unsupported claims.
     - Supervisor: Project evaluator. Judges if user's goal is met and work is complete.
 
     CRITICAL INSTRUCTIONS:
     1.  Review the LOG scratchpad, which contains the user's goal and the history of steps taken. Use scratchpad_summary() to see all pads.
-    2.  **LOOP AWARENESS**: You will be informed of your current loop number and remaining loops. Plan accordingly to finish BEFORE the final loop.
-    3.  **MULTI-PAD WORKFLOW**: Direct agents to work on different scratchpads in parallel:
+    2.  **KNOWLEDGE BASE CONTEXT AWARENESS** - CRITICAL FOR ALL QUERIES:
+        ═══════════════════════════════════════════════════════════════
+        **THE KNOWLEDGE BASE IS PROJECT-SPECIFIC, NOT A GENERAL REFERENCE LIBRARY**
+        ═══════════════════════════════════════════════════════════════
+
+        When the user connects a knowledge base and asks questions like:
+        - "Tell me about the project"
+        - "Who are the stakeholders?"
+        - "What are the objectives?"
+        - "What's the timeline?"
+
+        **They are asking about THE SPECIFIC PROJECT documented in the connected knowledge base**, NOT generic project management theory.
+
+        **CORRECT APPROACH - CONTEXT-AWARE SEARCH:**
+
+        **Loop 1 - Exploratory Discovery (ALWAYS START HERE):**
+        - Delegate 3-5 parallel searches to Research Agent with HIGH-LEVEL GOALS (NOT specific keywords):
+          ```json
+          {
+            "agent": "PARALLEL",
+            "tasks": [
+              {"agent": "Research Agent", "task": "Find information about the project name, goals, and objectives. Design sophisticated searches using multiple strategies."},
+              {"agent": "Research Agent", "task": "Find information about project stakeholders, team members, and sponsors. Use hybrid search with multiple keyword angles."},
+              {"agent": "Research Agent", "task": "Find information about project timeline, phases, and milestones. Run multiple searches with different terms."},
+              {"agent": "Research Agent", "task": "Find technical details, scope, and deliverables. Research Agent decides optimal search strategy."},
+              {"agent": "Research Agent", "task": "Find challenges, risks, and issues. Research Agent formulates and executes searches."}
+            ]
+          }
+          ```
+
+        **Loop 2 - Review Results & Identify Project:**
+        - Research Agent has automatically extracted findings to RESEARCH pad
+        - Review what was found:
+          * Did we find a specific project name? (e.g., "SFIS modernization", "F-35 manpower", "CEFIS migration")
+          * Who are the actual stakeholders mentioned? (specific people, roles, organizations)
+          * What are the actual goals/challenges described?
+        - Log the project identity to LOG pad: "Project identified: [name/description based on KB content]"
+
+        **Loop 3+ - Targeted Research:**
+        - NOW search for specific details using terms found in Loop 1-2
+        - Build OUTPUT sections using ACTUAL project information from KB
+
+        **WRONG APPROACH - DO NOT DO THIS:**
+        ❌ Searching for "PMBOK definition", "ISO 21500", "project management theory"
+        ❌ Getting 0 results and synthesizing generic PM content from built-in knowledge
+        ❌ Creating theoretical outlines about "projects in general"
+        ❌ Ignoring the specific project context in the knowledge base
+
+        **KEY PRINCIPLE:**
+        The knowledge base contains information about A SPECIFIC PROJECT. Your job is to:
+        1. **Discover** what that project is (Loop 1-2)
+        2. **Research** the specifics of that project (Loop 3+)
+        3. **Synthesize** an answer about THAT project using KB content
+
+        Do NOT answer with generic project management textbook content unless the KB truly contains nothing relevant (which is rare - if connected, it's relevant).
+
+    3.  **WHEN TO USE RESEARCH AGENT VS TOOL AGENT**:
+        ═══════════════════════════════════════════════════════════════
+        **RESEARCH AGENT - FOR ALL SEARCH/RESEARCH TASKS:**
+        ═══════════════════════════════════════════════════════════════
+
+        Use Research Agent when you need to FIND INFORMATION:
+        - ✅ "Find information about K-12 lesson plans with AI and data visualizations"
+        - ✅ "Research project stakeholders and their roles"
+        - ✅ "Search for technical requirements and constraints"
+        - ✅ "Locate data about training capacity and pipeline"
+        - ✅ "Find documents about manpower challenges"
+
+        **DO NOT specify keywords** - Research Agent formulates sophisticated searches:
+        - ❌ WRONG: {"agent": "Research Agent", "task": "Search with keywords: ['K-12', 'lesson', 'plan']"}
+        - ✅ CORRECT: {"agent": "Research Agent", "task": "Find information about K-12 lesson plans"}
+
+        Research Agent will:
+        - Design multiple search strategies (exact phrase, keywords, semantic)
+        - Run 5-10+ searches per research need (Cosmos DB queries are cheap!)
+        - Extract findings to RESEARCH pad automatically
+        - Refine searches if initial results insufficient
+
+        ═══════════════════════════════════════════════════════════════
+        **TOOL AGENT - FOR NON-SEARCH TOOL EXECUTION:**
+        ═══════════════════════════════════════════════════════════════
+
+        Use Tool Agent ONLY for specific tool calls (NOT searches):
+        - ✅ "Call get_database_schema() to discover available fields"
+        - ✅ "Run SQL query: SELECT TOP 10 * FROM c WHERE c.chunk_type = 'row'"
+        - ✅ "Convert 100 lbs to kg"
+        - ✅ "Calculate: 45 * 1.15"
+
+        **NEVER delegate searches to Tool Agent** - they lack search intelligence:
+        - ❌ WRONG: {"agent": "Tool Agent", "task": "Search for project timeline"}
+        - ✅ CORRECT: {"agent": "Research Agent", "task": "Find project timeline information"}
+
+    4.  **LOOP AWARENESS**: You will be informed of your current loop number and remaining loops. Plan accordingly to finish BEFORE the final loop.
+    6.  **MULTI-PAD WORKFLOW**: Direct agents to work on different scratchpads in parallel:
         - FORMAT pad: Submission format requirements (page limits, fonts, sections, required structure, etc.)
         - OUTLINE pad: Initial plan and structure (MUST follow FORMAT requirements if present)
         - RESEARCH pad: Gathered facts, search results, data points
@@ -6558,7 +6905,7 @@ AGENT_PERSONAS = {
         - DATA pad: Raw structured data (JSON, lists)
         - OUTPUT pad: Final answer being assembled (MUST follow FORMAT requirements if present)
         - LOG pad: Agent actions and decisions
-    4.  **PARALLEL EXECUTION IS DEFAULT**: You MUST delegate multiple independent tasks simultaneously whenever possible:
+    6.  **PARALLEL EXECUTION IS DEFAULT**: You MUST delegate multiple independent tasks simultaneously whenever possible:
         - Single task format: {{"agent": "AgentName", "task": "description"}} - USE ONLY when tasks are dependent
         - **Multiple tasks format (CHOOSE ONE)**:
           * Array format: [{{"agent": "Agent1", "task": "task1"}}, {{"agent": "Agent2", "task": "task2"}}]
@@ -6569,7 +6916,7 @@ AGENT_PERSONAS = {
           * Multiple information needs identified → ALL should be searched in parallel
           * Report writing task → Delegate multiple parallel searches to gather ALL needed data at once
         - **FORBIDDEN**: Sequential searches when parallel searches would work. ALWAYS delegate 3+ parallel tasks for comprehensive requests.
-    5.  **SQL QUERY TASKS - EXPLORATORY REFINEMENT WORKFLOW**:
+    7.  **SQL QUERY TASKS - EXPLORATORY REFINEMENT WORKFLOW**:
         ═══════════════════════════════════════════════════════════════
         **WHEN USER ASKS TO QUERY DATABASE OR FIND LEADS/RECORDS:**
         ═══════════════════════════════════════════════════════════════
@@ -6618,7 +6965,7 @@ AGENT_PERSONAS = {
         - ✅ Log discoveries before building complex queries
         - ✅ Build queries based on actual data patterns, not assumptions
 
-    6.  **STRATEGIC WORKFLOW FOR COMPREHENSIVE REPORTS**:
+    8.  **STRATEGIC WORKFLOW FOR COMPREHENSIVE REPORTS**:
 
         **For Report/Analysis Requests - Multi-Phase Approach:**
 
@@ -6713,7 +7060,7 @@ AGENT_PERSONAS = {
         - **Section-organized RESEARCH**: One section per outline subsection
         - **Incremental growth**: Sections grow from 10 lines → 50 lines → 100+ lines over time
         - **Continuous refinement**: Search → extract → write → review → refine → repeat
-    6.  **CRITICAL: AUTOMATIC EXTRACTION - MANDATORY WORKFLOW**:
+    9.  **CRITICAL: AUTOMATIC EXTRACTION - MANDATORY WORKFLOW**:
         ═══════════════════════════════════════════════════════════════
         🚨 THIS RULE IS NON-NEGOTIABLE - MUST FOLLOW EVERY LOOP 🚨
         ═══════════════════════════════════════════════════════════════
@@ -6795,7 +7142,7 @@ AGENT_PERSONAS = {
         - Multiple writers can work in parallel without conflicts
         - Easy to identify gaps: "OUTLINE has section 4.2 but no RESEARCH section 4.2"
         - Validators can review section-by-section: "Check if OUTPUT 3.1 properly uses RESEARCH 3.1"
-    7.  **PARALLEL, NON-SEQUENTIAL WORKFLOW - WORK ON MULTIPLE SECTIONS SIMULTANEOUSLY**:
+    10.  **PARALLEL, NON-SEQUENTIAL WORKFLOW - WORK ON MULTIPLE SECTIONS SIMULTANEOUSLY**:
         ═══════════════════════════════════════════════════════════════
         🚀 SECTIONS DON'T NEED TO BE COMPLETED SEQUENTIALLY 🚀
         ═══════════════════════════════════════════════════════════════
@@ -6825,21 +7172,21 @@ AGENT_PERSONAS = {
         - **Review and refine any section anytime** (don't wait for "all sections drafted")
         - **Fill gaps opportunistically**: If search for section 5 also has data for section 3, add to both
         - **Final goal**: ALL sections complete, regardless of completion order
-    8.  If the scratchpads are empty or only contain the user's goal, your FIRST STEP is to:
+   10.  If the scratchpads are empty or only contain the user's goal, your FIRST STEP is to:
         a) Analyze the user's question and identify core information needs (start with 3-5, not 10+)
         b) Delegate parallel searches to Tool Agent for core topics
         c) Optionally delegate to Writer to create outline in parallel
-    9.  On every subsequent turn, review the plan and the completed steps. DO NOT repeat tasks.
-    10. **BE COMPREHENSIVE BUT ITERATIVE**: Quality over quantity. Better to do 3 searches → extract findings → write → identify gaps → 3 more searches, than to do 15 searches all at once without extraction.
-    11. **PROGRESS CHECK**: After 3-4 steps, or when you have gathered significant information, delegate to the Supervisor to evaluate if the question is adequately answered.
-    12. **REFINEMENT WORKFLOW - MANDATORY CONTINUATION**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
+   11.  On every subsequent turn, review the plan and the completed steps. DO NOT repeat tasks.
+   12. **BE COMPREHENSIVE BUT ITERATIVE**: Quality over quantity. Better to do 3 searches → extract findings → write → identify gaps → 3 more searches, than to do 15 searches all at once without extraction.
+   13. **PROGRESS CHECK**: After 3-4 steps, or when you have gathered significant information, delegate to the Supervisor to evaluate if the question is adequately answered.
+   14. **REFINEMENT WORKFLOW - MANDATORY CONTINUATION**: If Supervisor says "NEED_MORE_WORK" with specific gaps:
         a) **DO NOT STOP** - the report is incomplete and must continue
         b) Identify what's missing from Supervisor's feedback (e.g., "missing sections 2, 3, 5, 8-10, 12-13")
         c) Delegate to Writer to draft the missing sections in parallel (use PARALLEL tasks for multiple sections)
         d) If data is needed for missing sections, delegate searches to Tool Agent first
         e) After missing sections are drafted, check with Supervisor again
         f) **NEVER finish if Supervisor said "NEED_MORE_WORK"** - always continue until Supervisor says "READY_TO_FINISH"
-    13. **OUTLINE ↔ OUTPUT SYNCHRONIZATION** (CRITICAL - MAINTAIN STRUCTURAL CONSISTENCY):
+    15. **OUTLINE ↔ OUTPUT SYNCHRONIZATION** (CRITICAL - MAINTAIN STRUCTURAL CONSISTENCY):
         ═══════════════════════════════════════════════════════════════
         **PRINCIPLE: OUTLINE IS THE AUTHORITATIVE STRUCTURE - OUTPUT MUST MATCH**
         ═══════════════════════════════════════════════════════════════
@@ -6879,7 +7226,7 @@ AGENT_PERSONAS = {
         d) If mismatches found: FIX THEM before proceeding to validation
         e) Delegate to Writer: "Audit OUTPUT section numbering against OUTLINE. Renumber any misnumbered subsections (e.g., multiple 5.3.X sections should be 5.3, 5.4, 5.5, etc.)"
 
-    14. **VALIDATION WORKFLOW**: If Supervisor says "READY_TO_FINISH":
+    16. **VALIDATION WORKFLOW**: If Supervisor says "READY_TO_FINISH":
         a) **CRITICAL**: DO NOT finish immediately - delegate formatting/polish tasks first
         b) **CHECK FOR ORPHANED SECTIONS**: Call scratchpad_list("output") and check if ANY sections exist that are NOT part of the final numbered structure. If found, delegate to Writer: "Merge content from orphaned sections [list names] into the appropriate numbered sections in OUTPUT pad"
         c) **CHECK OUTLINE ↔ OUTPUT SYNC**: Compare scratchpad_list("outline") vs scratchpad_list("output"). If structure mismatch, delegate to Writer to fix numbering/naming
@@ -6888,7 +7235,7 @@ AGENT_PERSONAS = {
         f) Then delegate to Validator to ensure the answer fully addresses the user's question AND is properly formatted
         g) If Validator approves, proceed to FINISH
         h) If Validator identifies issues, address them or refine further
-    15. **TABLES & VISUALIZATIONS PHASE** (critical for numerical data):
+    17. **TABLES & VISUALIZATIONS PHASE** (critical for numerical data):
         ═══════════════════════════════════════════════════════════════
         **WORKFLOW: PLACEHOLDER → CREATE → REPLACE**
         ═══════════════════════════════════════════════════════════════
@@ -6914,18 +7261,18 @@ AGENT_PERSONAS = {
         - "Create cost projection table FY2024-2040"
         - "Replace all TABLE_PLACEHOLDER markers with actual tables from TABLES pad"
 
-    16. **FORMATTING & POLISH PHASE** (after tables are inserted):
+    18. **FORMATTING & POLISH PHASE** (after tables are inserted):
         - Delegate to Writer: "Review and reformat OUTPUT sections - fix any LaTeX escaping, add narrative transitions between paragraphs, replace bullet-heavy sections with flowing prose"
         - Call scratchpad_cleanup_formatting() for each OUTPUT section
         - Ensure tables are integrated with narrative context (paragraph before/after explaining the table)
         - **DO NOT skip this phase** - unformatted or bullet-heavy output is unacceptable
-    17. **WHEN TO FINISH**:
+    19. **WHEN TO FINISH**:
         - If Supervisor says "READY_TO_FINISH" and OUTPUT pad has comprehensive sections (typically 5+ sections, 5000+ words total), delegate to **"FINISH_NOW"** agent with task: "Read the OUTPUT pad and deliver the final report to the user"
         - If Validator confirms the final answer is complete AND properly formatted, delegate to **"FINISH_NOW"** agent
         - **CRITICAL**: The agent name is "FINISH_NOW" not "FINISH" - use exact name
         - **The final answer given in the "task" field MUST BE STRICTLY GROUNDED IN THE SCRATCHPAD CONTENT. DO NOT ADD SPECULATION OR UNGROUNDED KNOWLEDGE.**
-    17. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
-    18. **DETECTING USER EDIT REQUESTS**:
+    20. **URGENCY**: If you have 2 or fewer loops remaining and have ANY useful information, immediately delegate to Supervisor to evaluate readiness to finish.
+    21. **DETECTING USER EDIT REQUESTS**:
         - **USER EDIT REQUEST INDICATORS**: Watch for these patterns in the user's goal or follow-up messages:
           * "Make [section] more [adjective]" (e.g., "make the intro shorter", "make cost analysis more detailed")
           * "Revise [section]..." or "Rewrite [section]..."
@@ -7669,6 +8016,201 @@ AGENT_PERSONAS = {
 
     {TOOL_DEFINITIONS}""", # Keep TOOL_DEFINITIONS for reference
 
+        "Research Agent": f"""You are an expert research specialist responsible for formulating and executing sophisticated search strategies. Your role is to FIND INFORMATION based on high-level goals from the Orchestrator. You MUST respond in JSON format with tool calls.
+
+    ═══════════════════════════════════════════════════════════════
+    🎯 YOUR MISSION: INTELLIGENT SEARCH FORMULATION & EXECUTION 🎯
+    ═══════════════════════════════════════════════════════════════
+
+    The Orchestrator gives you HIGH-LEVEL RESEARCH GOALS like:
+    - "Find information about K-12 lesson plans with AI-generated data visualizations"
+    - "Research project stakeholders and their roles"
+    - "Locate training capacity and pipeline data"
+
+    You must DESIGN and EXECUTE sophisticated searches to find that information.
+
+    ═══════════════════════════════════════════════════════════════
+    🔍 MULTI-ANGLE SEARCH STRATEGY - YOUR CORE WORKFLOW 🔍
+    ═══════════════════════════════════════════════════════════════
+
+    **COSMOS DB QUERIES ARE CHEAP** - Run 5-10+ searches per research goal!
+
+    **YOUR WORKFLOW FOR EVERY RESEARCH TASK:**
+
+    **STEP 1: DESIGN MULTIPLE SEARCH STRATEGIES**
+
+    For each research goal, plan 3-5 search angles:
+
+    Example goal: "Find information about K-12 lesson plans with AI-generated data visualizations"
+
+    Your search angles:
+    1. **Exact phrase search**: "K-12 lesson plans AI-generated data visualizations data storytelling"
+    2. **Broad keyword search**: ["K-12", "lesson plan", "education", "classroom"]
+    3. **Technology-focused search**: ["AI-generated", "data visualization", "data storytelling", "charts", "graphs"]
+    4. **Activity-focused search**: ["activity", "hands-on", "workshop", "under one hour", "exercise"]
+    5. **Pedagogical search**: ["teaching", "instruction", "learning", "student", "educator"]
+
+    **STEP 2: EXECUTE SEARCHES USING HYBRID SEARCH TOOL**
+
+    Use the search_knowledge_base tool with BOTH parameters:
+    - **keywords**: Individual terms (list of strings)
+    - **semantic_query_text**: Natural language query (full sentence/phrase)
+
+    {{
+      "tool_use": {{
+        "name": "search_knowledge_base",
+        "params": {{
+          "keywords": ["K-12", "lesson plan", "education", "classroom"],
+          "semantic_query_text": "K-12 lesson plans for classroom activities",
+          "rank_limit": 15
+        }}
+      }}
+    }}
+
+    Then run another search with different angle:
+
+    {{
+      "tool_use": {{
+        "name": "search_knowledge_base",
+        "params": {{
+          "keywords": ["AI-generated", "data visualization", "data storytelling"],
+          "semantic_query_text": "AI-generated data visualizations and data storytelling",
+          "rank_limit": 15
+        }}
+      }}
+    }}
+
+    **STEP 3: ANALYZE RESULTS**
+
+    After each search:
+    - Check if results are relevant
+    - Identify what's missing
+    - Design follow-up searches to fill gaps
+
+    **STEP 4: EXTRACT TO RESEARCH PAD**
+
+    Once you've gathered sufficient results, extract findings to RESEARCH pad:
+
+    {{
+      "tool_use": {{
+        "name": "scratchpad_write",
+        "params": {{
+          "pad_name": "research",
+          "section_name": "k12_lesson_plans",
+          "content": "# K-12 Lesson Plan Information\\n\\n## Overview\\n[Extracted findings from searches]\\n\\n## Data Visualizations\\n[Relevant details about AI-generated visualizations]\\n\\n## Activities\\n[One-hour activities found]\\n\\nSources: [doc IDs]",
+          "mode": "replace"
+        }}
+      }}
+    }}
+
+    ═══════════════════════════════════════════════════════════════
+    📊 ADAPTIVE SEARCH REFINEMENT 📊
+    ═══════════════════════════════════════════════════════════════
+
+    **IF INITIAL SEARCHES DON'T FIND ENOUGH:**
+
+    1. **Broaden terms**: "lesson plan" → ["lesson", "plan", "curriculum", "module"]
+    2. **Try synonyms**: "AI-generated" → ["artificial intelligence", "automated", "machine learning"]
+    3. **Search by document type**: ["PDF", "document", "file", "guide"]
+    4. **Search by entities**: ["teacher", "educator", "instructor", "facilitator"]
+    5. **Search by time/scope**: ["hour", "session", "workshop", "activity"]
+
+    **IF TOO MANY IRRELEVANT RESULTS:**
+
+    1. **Add specific terms**: ["K-12" + "data visualization" + "lesson"]
+    2. **Use exact phrase search**: semantic_query_text with very specific wording
+    3. **Filter by context**: Add domain-specific terms like "educational", "classroom"
+
+    ═══════════════════════════════════════════════════════════════
+    🚀 PARALLEL EXECUTION FOR SPEED 🚀
+    ═══════════════════════════════════════════════════════════════
+
+    **CRITICAL**: Since Cosmos DB queries are cheap, run MULTIPLE searches in your response:
+
+    {{
+      "tool_use": [
+        {{
+          "name": "search_knowledge_base",
+          "params": {{"keywords": ["K-12", "lesson", "plan"], "semantic_query_text": "K-12 lesson plans", "rank_limit": 15}}
+        }},
+        {{
+          "name": "search_knowledge_base",
+          "params": {{"keywords": ["AI-generated", "data visualization"], "semantic_query_text": "AI-generated data visualizations", "rank_limit": 15}}
+        }},
+        {{
+          "name": "search_knowledge_base",
+          "params": {{"keywords": ["activity", "hands-on", "workshop"], "semantic_query_text": "hands-on activities and workshops", "rank_limit": 15}}
+        }}
+      ]
+    }}
+
+    Results will be cached automatically - Orchestrator will delegate extraction in next loop.
+
+    ═══════════════════════════════════════════════════════════════
+    📚 EXAMPLE: COMPREHENSIVE RESEARCH WORKFLOW 📚
+    ═══════════════════════════════════════════════════════════════
+
+    **Orchestrator delegates:**
+    "Find information about Ohio K-12 educator training programs focused on AI literacy"
+
+    **Your response (Loop 1):**
+    {{
+      "tool_use": [
+        {{"name": "search_knowledge_base", "params": {{"keywords": ["Ohio", "K-12", "educator", "training"], "semantic_query_text": "Ohio K-12 educator training programs", "rank_limit": 15}}}},
+        {{"name": "search_knowledge_base", "params": {{"keywords": ["AI literacy", "artificial intelligence", "education"], "semantic_query_text": "AI literacy education for teachers", "rank_limit": 15}}}},
+        {{"name": "search_knowledge_base", "params": {{"keywords": ["professional development", "PD", "workshop", "training"], "semantic_query_text": "professional development workshops", "rank_limit": 15}}}},
+        {{"name": "search_knowledge_base", "params": {{"keywords": ["teach the teacher", "cascade", "train the trainer"], "semantic_query_text": "teach-the-teacher training cascade model", "rank_limit": 15}}}},
+        {{"name": "search_knowledge_base", "params": {{"keywords": ["AI readiness", "2030", "goal", "initiative"], "semantic_query_text": "AI readiness goals and initiatives", "rank_limit": 15}}}}
+      ]
+    }}
+
+    **Results cached** (5 searches, 75 total results)
+
+    **Orchestrator delegates (Loop 2):**
+    "Extract findings from cached searches and save to RESEARCH pad"
+
+    **Your response (Loop 2):**
+    {{
+      "tool_use": {{
+        "name": "scratchpad_write",
+        "params": {{
+          "pad_name": "research",
+          "section_name": "ohio_ai_literacy_training",
+          "content": "# Ohio K-12 AI Literacy Training Programs\\n\\n## Program Overview\\n- **Name**: AI Literacy & Data Analytics – Teach-the-Teacher PD Series\\n- **Goal**: Prepare Ohio's K-12 educators to become local AI champions\\n- **Target**: AI-readiness 2030 state goal\\n\\n## Delivery Model\\n- **Format**: 7 stand-alone workshops (2 hours each)\\n- **Track 1**: Workshops 1-4 on AI Literacy Fundamentals\\n- **Track 2**: Workshops 5-7 on Data Literacy & Analytics\\n\\n## Workshop Structure\\n- 75-minute SME deep dive\\n- 45-minute hands-on practice with vetted AI tools\\n- Take-home classroom module\\n\\n## Flexibility\\n- Educators can attend à-la-carte\\n- Full-series completers invited to Community of Practice\\n\\nSources: [doc_training_overview_123], [doc_workshop_details_456]",
+          "mode": "replace"
+        }}
+      }}
+    }}
+
+    **IF RESULTS INSUFFICIENT (Loop 3):**
+    Run refined follow-up searches based on what you learned:
+    - Found "Community of Practice" → Search for ["community", "network", "collaboration"]
+    - Found "vetted AI tools" → Search for ["tools", "software", "platforms", "applications"]
+    - Missing details on cost → Search for ["cost", "funding", "grant", "budget"]
+
+    ═══════════════════════════════════════════════════════════════
+    ❌ COMMON MISTAKES TO AVOID ❌
+    ═══════════════════════════════════════════════════════════════
+
+    1. **DON'T run just one search** - Always run 3-5+ searches per research goal
+    2. **DON'T use only keywords** - Use BOTH keywords AND semantic_query_text
+    3. **DON'T wait to be told exact keywords** - YOU design the search strategy
+    4. **DON'T extract before searching** - Search first, extract in next loop
+    5. **DON'T give up after one try** - Refine and try different angles
+
+    ═══════════════════════════════════════════════════════════════
+    ✅ SUCCESS CRITERIA ✅
+    ═══════════════════════════════════════════════════════════════
+
+    You are successful when:
+    - ✅ Ran 5-10+ diverse searches for comprehensive coverage
+    - ✅ Used hybrid search (keywords + semantic queries)
+    - ✅ Found relevant documents from multiple angles
+    - ✅ Extracted findings to well-organized RESEARCH sections
+    - ✅ Identified and filled information gaps through refinement
+
+    {TOOL_DEFINITIONS}""",
+
         "Query Refiner": """You are an expert query refinement specialist. Your job is to analyze search results and create more targeted, refined queries. You MUST respond in JSON format.
 
     CRITICAL INSTRUCTIONS:
@@ -8314,7 +8856,78 @@ AGENT_PERSONAS = {
         - Loops 1-10: Focus on accumulating RESEARCH (search → extract → save cycle)
         - Loops 11-25: Focus on building OUTPUT sections and TABLES from research
         - Loops 26-40: Focus on refining, expanding detail, polishing format
-        - **Don't finish too early** - comprehensive reports need 30-40 loops of iterative building""",
+        - **Don't finish too early** - comprehensive reports need 30-40 loops of iterative building
+
+    11. **SCRATCHPAD MANAGEMENT OVERSIGHT** - You are responsible for checking proper scratchpad usage:
+        ═══════════════════════════════════════════════════════════════
+        🗂️ ALL SCRATCHPADS MUST BE USED APPROPRIATELY 🗂️
+        ═══════════════════════════════════════════════════════════════
+
+        **AVAILABLE SCRATCHPADS (8 total):**
+        1. **OUTPUT** - Final deliverable being assembled
+        2. **RESEARCH** - Raw findings from searches (should have 15-20+ sections for comprehensive work)
+        3. **TABLES** - Formatted markdown tables (numerical data, comparisons)
+        4. **PLOTS** - Plot specifications and chart data
+        5. **OUTLINE** - Initial plan and structure (created early, guides all work)
+        6. **FORMAT** - Submission format requirements (if found in documents)
+        7. **DATA** - Structured data (JSON, lists, raw numbers)
+        8. **LOG** - Agent actions and workflow decisions (user_goal, loop history)
+
+        **YOUR SCRATCHPAD MANAGEMENT CHECKS:**
+
+        **Check 1: OUTLINE exists and guides work**
+        - Call scratchpad_list("outline") to verify outline sections exist
+        - If outline is missing or too vague → Delegate to Writer to create detailed outline
+        - Outline should have 6-10 major sections with subsections
+        - All OUTPUT sections should map to outline sections
+
+        **Check 2: RESEARCH pad is well-organized**
+        - Call scratchpad_list("research") to see all sections
+        - Research sections should map to outline sections (e.g., "2.1_background", "3.1_staffing_levels")
+        - If research sections are disorganized → Delegate to Research Agent to reorganize
+        - For comprehensive reports: Need 15-20+ research sections minimum
+
+        **Check 3: TABLES pad used for numerical data**
+        - Call scratchpad_list("tables") to check for tables
+        - If OUTPUT has numerical data but TABLES pad is empty → Delegate to Engineer to create tables
+        - Tables should be referenced in OUTPUT sections
+
+        **Check 4: FORMAT pad checked for requirements**
+        - Call scratchpad_read("format", "requirements") to check for format requirements
+        - If FORMAT pad has requirements → Verify OUTPUT follows them (page limits, fonts, structure)
+        - If OUTPUT violates format requirements → Delegate to Writer to reformat
+
+        **Check 5: LOG pad tracks user goal**
+        - Already checked in instruction #1, but verify LOG.user_goal exists
+        - LOG should also track major decisions ("Loop 5: Started OUTPUT drafting", "Loop 20: Added 3 tables")
+
+        **Check 6: DATA/PLOTS pads used if applicable**
+        - If task involves data analysis → Check if DATA pad has structured data
+        - If task requires visualizations → Check if PLOTS pad has plot specs
+        - If these should be used but aren't → Delegate to Engineer
+
+        **SCRATCHPAD QUALITY INDICATORS:**
+        ✅ **Good scratchpad usage:**
+        - OUTLINE guides all work
+        - RESEARCH sections organized by outline structure
+        - OUTPUT mirrors outline structure
+        - TABLES created for all numerical data
+        - FORMAT requirements followed
+        - LOG tracks decisions
+
+        ❌ **Poor scratchpad usage:**
+        - No outline, agents working without structure
+        - RESEARCH sections have generic names ("search_1", "results_2")
+        - OUTPUT doesn't follow outline
+        - Numerical data in OUTPUT instead of TABLES pad
+        - FORMAT requirements ignored
+
+        **WHEN TO INTERVENE:**
+        - If scratchpads are poorly organized → Recommend reorganization BEFORE continuing
+        - If key pads are missing content → Delegate specific work to fill gaps
+        - Example: "NEED_MORE_WORK - OUTLINE pad is missing. Delegate to Writer to create detailed outline with 8 major sections and subsections. Then reorganize RESEARCH sections to match outline structure."
+
+        **CRITICAL**: Check scratchpad organization every 10 loops to ensure quality work""",
 
         "FINISH_NOW": """You are the final answer delivery agent. Your job is to read the OUTPUT scratchpad and deliver it to the user with a complete bibliography.
 
@@ -8344,7 +8957,7 @@ AGENT_PERSONAS = {
         "Editor": """You are an expert document editor who can revise, rewrite, and modify specific sections of documents. You MUST respond in JSON format.
 
     CRITICAL INSTRUCTIONS:
-    0.  **CHECK FORMAT REQUIREMENTS FIRST**: Before making ANY edits, call scratchpad_read("format", "requirements") to verify submission format requirements exist. All your edits MUST follow FORMAT pad requirements (page limits, required sections, structure, etc.). FORMAT requirements take precedence over any other considerations.
+    0.  **FORMAT REQUIREMENTS (OPTIONAL)**: The FORMAT pad contains specific formatting requirements (page limits, required sections, structure) IF they were found in the knowledge base. FORMAT requirements are OPTIONAL and only apply when creating formal deliverables (reports, proposals, documents with specific requirements). For general editing tasks (fix typos, renumber sections, improve clarity), you DO NOT need to check the FORMAT pad - just proceed with the requested edits. Only check FORMAT requirements when the task involves creating a formal deliverable that must meet specific format criteria.
 
     1.  **SECTION-AWARE EDITING**: You work on specific sections in the OUTPUT pad
         - First, call scratchpad_list("output") to see all available sections
@@ -8621,6 +9234,7 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
 
     if tool_name == "search_knowledge_base":
         keywords = params.get("keywords", [])
+        semantic_query_text = params.get("semantic_query_text", "")
         rank_limit = int(params.get("rank_limit", 10))
 
         if not keywords:
@@ -8637,26 +9251,6 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         ]
 
         SINGLE_QUOTE = chr(39)
-        per_keyword_groups = []
-        for k in keywords:
-            safe_k = k.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
-            field_clauses = [f"CONTAINS({fld}, '{safe_k}', true)" for fld in search_fields]
-            per_keyword_groups.append("(" + " OR ".join(field_clauses) + ")")
-
-        # OR across keywords (broad recall)
-        keyword_clause = " OR ".join(per_keyword_groups)
-
-        # Add filter to exclude financial/invoice documents (improves relevance)
-        # This prevents invoice/billing documents from drowning out substantive research
-        exclusion_clause = "(NOT IS_DEFINED(c.document_type) OR c.document_type != 'Financial') AND (NOT IS_DEFINED(c.classification.doc_type) OR c.classification.doc_type != 'Financial')"
-
-        where_clause = f"({keyword_clause}) AND {exclusion_clause}"
-
-        sql_query = (
-            f"SELECT TOP {rank_limit} c.id, c.content, c.metadata, c.question, c.answer "
-            f"FROM c "
-            f"WHERE {where_clause}"
-        )
 
         # ACTUALLY EXECUTE THE QUERY AGAINST SELECTED KNOWLEDGE BASES
         all_selected_kbs = st.session_state.get("selected_containers", [])
@@ -8666,25 +9260,158 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         # 🎯 INTELLIGENT CONTAINER SELECTION: Analyze query intent and auto-select appropriate containers
         selected_kbs = analyze_query_intent_and_select_containers(keywords, all_selected_kbs)
 
+        # Add filter to exclude financial/invoice documents (improves relevance)
+        exclusion_clause = "(NOT IS_DEFINED(c.document_type) OR c.document_type != 'Financial') AND (NOT IS_DEFINED(c.classification.doc_type) OR c.classification.doc_type != 'Financial')"
+
+        # ========================================
+        # HYBRID SEARCH IMPLEMENTATION
+        # ========================================
+        # Execute 3 search strategies in parallel and merge results with scoring
+
         all_results = []
         errors = []
+        query_strategies = []  # Track which queries we're running
+
         for kb_path in selected_kbs:
             try:
                 db_name, cont_name = kb_path.split('/')
                 uploader = get_cosmos_uploader(db_name, cont_name)
-                if uploader:
-                    results = uploader.execute_query(sql_query)
-                    for r in results:
-                        if isinstance(r, dict):
+                if not uploader:
+                    continue
+
+                kb_results_by_id = {}  # Track results by ID to avoid duplicates
+
+                # ========================================
+                # STRATEGY 1: EXACT PHRASE MATCHING (Highest Priority)
+                # ========================================
+                # Search for exact semantic query text if provided
+                if semantic_query_text and len(semantic_query_text.strip()) > 3:
+                    safe_semantic = semantic_query_text.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
+                    phrase_field_clauses = [f"CONTAINS({fld}, '{safe_semantic}', true)" for fld in search_fields]
+                    phrase_where = f"({' OR '.join(phrase_field_clauses)}) AND {exclusion_clause}"
+
+                    phrase_query = (
+                        f"SELECT TOP {rank_limit} c.id, c.content, c.metadata, c.question, c.answer "
+                        f"FROM c "
+                        f"WHERE {phrase_where}"
+                    )
+
+                    try:
+                        phrase_results = uploader.execute_query(phrase_query)
+                        for r in phrase_results:
+                            if isinstance(r, dict) and "id" in r:
+                                r["_source_container"] = kb_path
+                                r["_search_score"] = 100  # Highest score for exact phrase matches
+                                r["_match_strategy"] = "exact_phrase"
+                                kb_results_by_id[r["id"]] = r
+                        if len(phrase_results) > 0:
+                            query_strategies.append(f"exact_phrase({len(phrase_results)} matches)")
+                    except Exception as e:
+                        logger.warning(f"Exact phrase search failed for {kb_path}: {e}")
+
+                # ========================================
+                # STRATEGY 2: KEYWORD OR SEARCH (Broad Recall)
+                # ========================================
+                # Original broad keyword search
+                per_keyword_groups = []
+                for k in keywords:
+                    safe_k = k.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
+                    field_clauses = [f"CONTAINS({fld}, '{safe_k}', true)" for fld in search_fields]
+                    per_keyword_groups.append("(" + " OR ".join(field_clauses) + ")")
+
+                keyword_clause = " OR ".join(per_keyword_groups)
+                keyword_where = f"({keyword_clause}) AND {exclusion_clause}"
+
+                keyword_query = (
+                    f"SELECT TOP {rank_limit * 2} c.id, c.content, c.metadata, c.question, c.answer "
+                    f"FROM c "
+                    f"WHERE {keyword_where}"
+                )
+
+                try:
+                    keyword_results = uploader.execute_query(keyword_query)
+                    for r in keyword_results:
+                        if isinstance(r, dict) and "id" in r:
                             r["_source_container"] = kb_path
-                    all_results.extend(results)
-                    logger.info(f"search_knowledge_base: Retrieved {len(results)} results from {kb_path}")
+                            # Only add if not already found by exact phrase search
+                            if r["id"] not in kb_results_by_id:
+                                r["_search_score"] = 50  # Medium score for keyword matches
+                                r["_match_strategy"] = "keyword_or"
+                                kb_results_by_id[r["id"]] = r
+                            else:
+                                # Boost score if matched by multiple strategies
+                                kb_results_by_id[r["id"]]["_search_score"] += 25
+                                kb_results_by_id[r["id"]]["_match_strategy"] += ",keyword_or"
+                    if len(keyword_results) > 0:
+                        query_strategies.append(f"keyword_or({len(keyword_results)} matches)")
+                except Exception as e:
+                    error_msg = f"Keyword search failed for {kb_path}: {str(e)}"
+                    errors.append(error_msg)
+                    logger.error(error_msg)
+
+                # ========================================
+                # STRATEGY 3: SEMANTIC FIELD-PRIORITIZED SEARCH
+                # ========================================
+                # If semantic_query_text provided, search with field-specific weighting
+                if semantic_query_text and len(semantic_query_text.strip()) > 3:
+                    # Extract key terms from semantic query (split by spaces, filter short words)
+                    semantic_terms = [t.strip() for t in semantic_query_text.split() if len(t.strip()) > 3]
+
+                    if semantic_terms:
+                        # Build query that prioritizes content field over metadata
+                        semantic_field_groups = []
+                        for term in semantic_terms[:5]:  # Limit to first 5 terms to avoid query size issues
+                            safe_term = term.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
+                            # Prioritize content and question/answer fields
+                            priority_fields = ["c.content", "c.question", "c.answer"]
+                            field_clauses = [f"CONTAINS({fld}, '{safe_term}', true)" for fld in priority_fields]
+                            semantic_field_groups.append("(" + " OR ".join(field_clauses) + ")")
+
+                        semantic_clause = " OR ".join(semantic_field_groups)
+                        semantic_where = f"({semantic_clause}) AND {exclusion_clause}"
+
+                        semantic_query = (
+                            f"SELECT TOP {rank_limit} c.id, c.content, c.metadata, c.question, c.answer "
+                            f"FROM c "
+                            f"WHERE {semantic_where}"
+                        )
+
+                        try:
+                            semantic_results = uploader.execute_query(semantic_query)
+                            for r in semantic_results:
+                                if isinstance(r, dict) and "id" in r:
+                                    r["_source_container"] = kb_path
+                                    if r["id"] not in kb_results_by_id:
+                                        r["_search_score"] = 75  # High score for semantic matches
+                                        r["_match_strategy"] = "semantic_weighted"
+                                        kb_results_by_id[r["id"]] = r
+                                    else:
+                                        # Boost score if matched by multiple strategies
+                                        kb_results_by_id[r["id"]]["_search_score"] += 35
+                                        kb_results_by_id[r["id"]]["_match_strategy"] += ",semantic_weighted"
+                            if len(semantic_results) > 0:
+                                query_strategies.append(f"semantic_weighted({len(semantic_results)} matches)")
+                        except Exception as e:
+                            logger.warning(f"Semantic field search failed for {kb_path}: {e}")
+
+                # Add all deduplicated results from this KB to final results
+                all_results.extend(kb_results_by_id.values())
+
+                logger.info(f"search_knowledge_base: Retrieved {len(kb_results_by_id)} unique results from {kb_path} using {len(query_strategies)} strategies")
+
             except Exception as e:
                 error_msg = f"Error querying {kb_path}: {str(e)}"
                 errors.append(error_msg)
                 logger.error(error_msg)
 
-        result_summary = f"Found {len(all_results)} result(s) across {len(selected_kbs)} knowledge base(s)."
+        # ========================================
+        # MERGE AND RANK RESULTS
+        # ========================================
+        # Sort by search score (highest first), then limit to rank_limit
+        all_results_sorted = sorted(all_results, key=lambda x: x.get("_search_score", 0), reverse=True)
+        final_results = all_results_sorted[:rank_limit]
+
+        result_summary = f"Found {len(final_results)} result(s) across {len(selected_kbs)} knowledge base(s) using hybrid search ({', '.join(query_strategies)})."
         if errors:
             result_summary += f" Errors: {'; '.join(errors)}"
 
@@ -8694,13 +9421,15 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
             st.session_state.loop_results_cache[cache_key] = {
                 "tool": "search_knowledge_base",
                 "keywords": keywords,
+                "semantic_query_text": semantic_query_text,
                 "rank_limit": rank_limit,
-                "results": all_results,
+                "results": final_results,
                 "summary": result_summary,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "search_strategies": query_strategies
             }
 
-        return f"Tool Observation: {result_summary}\n\nQuery: {sql_query}\n\nResults:\n{json.dumps(all_results, indent=2)}"
+        return f"Tool Observation: {result_summary}\n\nResults:\n{json.dumps(final_results, indent=2)}"
 
 
     # --- Standard Tool Execution (calc, json_parse, etc.) ---
@@ -8888,7 +9617,15 @@ You have access to all scratchpad tools."""
         # Extract tool call if present
         if "tool_use" in agent_output:
             tool = agent_output["tool_use"]
-            result["tool_call"] = (tool.get("name"), tool.get("params", {}))
+            # Handle both dict and list formats
+            if isinstance(tool, dict):
+                result["tool_call"] = (tool.get("name"), tool.get("params", {}))
+            elif isinstance(tool, list) and len(tool) > 0:
+                # If list, take first tool
+                first_tool = tool[0] if isinstance(tool[0], dict) else {}
+                result["tool_call"] = (first_tool.get("name"), first_tool.get("params", {}))
+            else:
+                result["error"] = f"Invalid tool_use format: {type(tool)}"
         elif "response" in agent_output:
             result["observation"] = agent_output["response"]
 
@@ -9287,6 +10024,9 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
 
                 # Preserve scratchpads when user stops - they may want to continue
                 st.session_state.workflow_incomplete = True
+                # Clear workflow_interrupted since this was an intentional stop
+                st.session_state.workflow_interrupted = False
+                st.session_state.message_processed = True
 
                 # Save workflow state to conversation metadata
                 if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
@@ -9305,6 +10045,11 @@ Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pa
 
         loop_num = i + 1
         st.toast(f"Agent Loop {loop_num}/{MAX_LOOPS}")
+
+        # Periodic auto-save scratchpads to blob (every 5 loops)
+        if loop_num % 5 == 0 and is_running_on_azure():
+            save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
+            logger.info(f"Auto-saved scratchpads at loop {loop_num}")
 
         # 1. Orchestrator: Plan and delegate the next step
         loops_remaining = MAX_LOOPS - loop_num
@@ -9825,6 +10570,11 @@ Use all the information above to compile the final answer."""}
                                     tool_params = result["tool_call"][1]
                                     scratchpad += f"  - 🔧 **{agent_name}**: Calling tool `{tool_name}`\n"
                                     scratchpad += f"    - **Parameters**: `{json.dumps(tool_params, indent=2)[:1000]}`\n"
+
+                                    # Highlight semantic search usage
+                                    if tool_name == "search_knowledge_base" and tool_params.get("semantic_query_text"):
+                                        scratchpad += f"    - 🎯 **Hybrid Search**: Using semantic query + keywords for better relevance\n"
+                                        scratchpad += f"    - 📝 **Semantic Query**: \"{tool_params['semantic_query_text'][:150]}...\"\n"
                                 else:
                                     scratchpad += f"  - ✓ **{agent_name}**: Completed\n"
                                     # Show response if available
@@ -10004,27 +10754,36 @@ You have access to all scratchpad tools for reading and writing."""
                             scratchpad += f"- **Validator Decision:** {observation}\n"
                             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
-                            # Extract the Writer's final answer from scratchpad
-                            # Look for the last Writer response
-                            writer_answer = "Unable to extract final answer from scratchpad."
-                            scratchpad_lines = scratchpad.split("\n")
-                            for i in range(len(scratchpad_lines) - 1, -1, -1):
-                                if "Writer" in scratchpad_lines[i] and i + 1 < len(scratchpad_lines):
-                                    # Try to find the response in nearby lines
-                                    for j in range(i, min(i + 10, len(scratchpad_lines))):
-                                        if scratchpad_lines[j].strip().startswith("- **Action Result:**"):
-                                            writer_answer = scratchpad_lines[j].replace("- **Action Result:**", "").strip()
-                                            break
-                                    break
+                            # Get the final answer from OUTPUT scratchpad (same as Supervisor path)
+                            output_content = scratchpad_mgr.get_full_content("output")
 
-                            # If we couldn't extract, look for any recent response that looks like final answer
-                            if writer_answer == "Unable to extract final answer from scratchpad.":
-                                for line in reversed(scratchpad_lines):
-                                    if len(line) > 100 and ("answer" in line.lower() or "summary" in line.lower()):
-                                        writer_answer = line.strip()
-                                        break
+                            if output_content and len(output_content.strip()) > 50:
+                                # Output pad has substantial content, use it directly
+                                final_answer = output_content.strip()
+                            else:
+                                # Fallback: try to compile from other pads
+                                finish_messages = [
+                                    {"role": "system", "content": AGENT_PERSONAS["Writer"]},
+                                    {"role": "user", "content": f"""The Validator has confirmed the final answer is complete. Please compile the final answer from the scratchpads.
 
-                            final_answer_placeholder.markdown(writer_answer)
+**USER GOAL:**
+{scratchpad_mgr.read_section("log", "user_goal")}
+
+**OUTPUT PAD:**
+{output_content if output_content else "(empty)"}
+
+**RESEARCH PAD:**
+{scratchpad_mgr.get_full_content("research")[:5000] if scratchpad_mgr.list_sections("research") else "(empty)"}
+
+Compile the final answer from the information above. Return ONLY the final answer text, not JSON."""}
+                                ]
+                                response = o3_client.chat.completions.create(
+                                    model=st.session_state.O3_DEPLOYMENT,
+                                    messages=finish_messages
+                                )
+                                final_answer = response.choices[0].message.content.strip()
+
+                            final_answer_placeholder.markdown(final_answer)
                             scratchpad += f"- **Action:** FINISHED - Validator approved final answer (Loop {loop_num}/{MAX_LOOPS}).\n"
                             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
@@ -10041,7 +10800,7 @@ You have access to all scratchpad tools for reading and writing."""
                             if is_running_on_azure():
                                 save_scratchpad_db_to_blob(st.session_state.get('user_id'), scratchpad_mgr.db_path)
 
-                            return writer_answer
+                            return final_answer
 
                         # --- SUPERVISOR EARLY TERMINATION CHECK ---
                         if next_agent == "Supervisor" and "READY_TO_FINISH" in observation:
@@ -10190,6 +10949,18 @@ Compile the final answer from the information above. Return ONLY the final answe
                         result_display = tool_result_observation[:3000]
                         if len(tool_result_observation) > 3000:
                             result_display += f"\n... (truncated, full length: {len(tool_result_observation)} chars)"
+
+                        # Highlight hybrid search strategies for search_knowledge_base
+                        if tool_name == "search_knowledge_base":
+                            # Extract search strategies from result
+                            if "using hybrid search" in tool_result_observation:
+                                strategies_start = tool_result_observation.find("using hybrid search (")
+                                if strategies_start > 0:
+                                    strategies_end = tool_result_observation.find(")", strategies_start)
+                                    if strategies_end > 0:
+                                        strategies = tool_result_observation[strategies_start:strategies_end+1]
+                                        scratchpad += f"- **🔍 Search Strategies:** {strategies}\n"
+
                         scratchpad += f"- **Action Result:** {result_display}\n"
                         log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                         update_all_scratchpads()  # Update all scratchpad live views after tool execution
@@ -10208,6 +10979,12 @@ Compile the final answer from the information above. Return ONLY the final answe
             scratchpad += f"- **Tool Call:** {colored_tool_call}\n"
             # Show full parameters (limit to 2000 chars for readability)
             scratchpad += f"  - **Parameters:** {json.dumps(params, indent=2)[:2000]}\n"
+
+            # Highlight semantic search usage for search_knowledge_base
+            if tool_name == "search_knowledge_base" and params.get("semantic_query_text"):
+                scratchpad += f"  - 🎯 **Hybrid Search Mode**: Using semantic query + keywords\n"
+                scratchpad += f"  - 📝 **Semantic Query**: \"{params['semantic_query_text'][:150]}...\"\n"
+
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
 
             try:
@@ -10333,6 +11110,18 @@ Compile the final answer from the information above. Return ONLY the final answe
             obs_display = observation[:3000]
             if len(observation) > 3000:
                 obs_display += f"\n... (truncated, full length: {len(observation)} chars)"
+
+            # Highlight hybrid search strategies for search_knowledge_base
+            if tool_call_to_execute and tool_call_to_execute[0] == "search_knowledge_base":
+                # Extract search strategies from result
+                if "using hybrid search" in observation:
+                    strategies_start = observation.find("using hybrid search (")
+                    if strategies_start > 0:
+                        strategies_end = observation.find(")", strategies_start)
+                        if strategies_end > 0:
+                            strategies = observation[strategies_start:strategies_end+1]
+                            scratchpad += f"- **🔍 Search Strategies:** {strategies}\n"
+
             scratchpad += f"- **Action Result:** {obs_display}\n"
             log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
             update_all_scratchpads()  # Update all scratchpad live views after observation
@@ -10402,10 +11191,50 @@ def on_persona_change(widget_key):
     if st.session_state.editing_persona or st.session_state.creating_persona:
         return
     sel = st.session_state[widget_key]
-    st.session_state.user_data = create_new_chat(
-        st.session_state.user_id, st.session_state.user_data, sel
-    )
-    st.session_state.last_persona_selected = sel
+
+    # Check if we have an active chat with scratchpads
+    active_chat_id = st.session_state.user_data.get("active_conversation_id")
+    has_scratchpads = False
+    if active_chat_id and "scratchpad_manager" in st.session_state:
+        # Check if current chat has any scratchpad content
+        scratchpad_mgr = st.session_state.scratchpad_manager
+        for pad_type in ["output", "research", "outline", "format", "tables", "data", "plots", "log"]:
+            if scratchpad_mgr.list_sections(pad_type):
+                has_scratchpads = True
+                break
+
+    # If chat has scratchpads, switch persona IN-PLACE (don't create new chat)
+    # This allows user to interact with same scratchpads using different persona
+    if has_scratchpads and active_chat_id in st.session_state.user_data["conversations"]:
+        # Update persona in current chat's system message
+        system_msg = st.session_state.user_data["conversations"][active_chat_id][0]
+        persona = st.session_state.user_data["personas"][sel]
+        system_msg["content"] = persona["prompt"]
+        system_msg["persona_name"] = sel
+
+        # Save updated chat
+        save_user_data(st.session_state.user_id, st.session_state.user_data)
+        st.session_state.last_persona_selected = sel
+
+        # DON'T clear workflow flags - allow resuming
+        # DON'T create new chat - keep scratchpads accessible
+    else:
+        # No scratchpads - safe to create new chat (existing behavior)
+        st.session_state.user_data = create_new_chat(
+            st.session_state.user_id, st.session_state.user_data, sel
+        )
+        st.session_state.last_persona_selected = sel
+        # Clear workflow flags when changing persona (creates new chat)
+        st.session_state.workflow_interrupted = False
+        st.session_state.message_processed = False
+        st.session_state.workflow_incomplete = False
+        st.session_state.is_generating = False
+        st.session_state.workflow_ready_to_start = False
+
+# Restore chat settings BEFORE sidebar renders to ensure KB dropdown shows correct count
+active_chat_id = st.session_state.user_data.get("active_conversation_id")
+if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
+    restore_chat_settings(active_chat_id, st.session_state.user_data)
 
 with st.sidebar:
     st.markdown('<div class="mini-header">User Account</div>', unsafe_allow_html=True)
@@ -10451,6 +11280,12 @@ with st.sidebar:
             st.session_state.user_data,
             st.session_state.last_persona_selected
         )
+        # Clear workflow flags when starting new chat
+        st.session_state.workflow_interrupted = False
+        st.session_state.message_processed = False
+        st.session_state.workflow_incomplete = False
+        st.session_state.is_generating = False
+        st.session_state.workflow_ready_to_start = False
         st.rerun()
 
     # Get available containers (used by both Knowledge Bases and Upload sections)
@@ -10530,6 +11365,11 @@ with st.sidebar:
 
         # Auto-apply: immediately commit working selection to selected_containers
         st.session_state.selected_containers = list(st.session_state.kb_working_selection)
+
+        # Auto-save KB selection to chat metadata for persistence
+        active_chat_id = st.session_state.user_data.get("active_conversation_id")
+        if active_chat_id:
+            update_chat_settings(st.session_state.user_id, st.session_state.user_data, active_chat_id)
 
         st.divider()
         st.caption(f"✅ {len(st.session_state.selected_containers)} knowledge base(s) selected")
@@ -10712,6 +11552,12 @@ with st.sidebar:
                 full_path = f"{target_db}/{target_cont}"
                 if create_container_if_not_exists(target_db, target_cont):
                     st.session_state.upload_target = full_path
+
+                    # Auto-save new container to chat metadata for persistence
+                    active_chat_id = st.session_state.user_data.get("active_conversation_id")
+                    if active_chat_id:
+                        update_chat_settings(st.session_state.user_id, st.session_state.user_data, active_chat_id)
+
                     st.rerun()
             else:
                 st.warning("Please enter a name for the new container.")
@@ -10727,6 +11573,12 @@ with st.sidebar:
         )
         if chosen_container != st.session_state.upload_target:
             st.session_state.upload_target = chosen_container
+
+            # Auto-save upload target to chat metadata for persistence
+            active_chat_id = st.session_state.user_data.get("active_conversation_id")
+            if active_chat_id:
+                update_chat_settings(st.session_state.user_id, st.session_state.user_data, active_chat_id)
+
             st.rerun()
 
     # --- UPDATED: Allow multiple file uploads including .txt and .md ---
@@ -10935,7 +11787,26 @@ with st.sidebar:
                 st.error(f"Failed to load existing leads: {e}")
                 attach_to_existing_lead = False
 
-    ingest_to_cosmos = st.toggle("Ingest to Knowledge Base", value=True, help="If on, saves the document permanently. If off, uses it for this session only.")
+    # Callback to auto-save ingest_to_cosmos setting
+    def on_ingest_toggle_change():
+        active_chat_id = st.session_state.user_data.get("active_conversation_id")
+        if active_chat_id:
+            # Update session state from widget state
+            st.session_state.ingest_to_cosmos = st.session_state.ingest_toggle
+            # Save to chat metadata
+            update_chat_settings(st.session_state.user_id, st.session_state.user_data, active_chat_id)
+
+    # Initialize ingest_to_cosmos if not set
+    if "ingest_to_cosmos" not in st.session_state:
+        st.session_state.ingest_to_cosmos = True
+
+    ingest_to_cosmos = st.toggle(
+        "Ingest to Knowledge Base",
+        value=st.session_state.ingest_to_cosmos,
+        help="If on, saves the document permanently. If off, uses it for this session only.",
+        key="ingest_toggle",
+        on_change=on_ingest_toggle_change
+    )
 
     # --- Check for duplicates before processing ---
     if uploaded_files and ingest_to_cosmos and st.session_state.upload_target:
@@ -11206,11 +12077,29 @@ with st.sidebar:
                     st.session_state.chats_to_delete = []; st.rerun()
             with col2:
                 if st.button("Delete Selected", use_container_width=True) and st.session_state.chats_to_delete:
+                    user_id = st.session_state.get('user_id')
+
+                    # Delete scratchpads first (if scratchpad manager exists)
+                    if "scratchpad_manager" in st.session_state:
+                        scratchpad_mgr = st.session_state.scratchpad_manager
+                        for chat_id in st.session_state.chats_to_delete:
+                            session_id = f"{user_id}_{chat_id}"
+                            scratchpad_mgr.delete_session_scratchpads(session_id)
+
+                        # Vacuum database to reclaim space after deletions
+                        scratchpad_mgr.vacuum_database()
+
+                        # Save cleaned scratchpad DB to blob
+                        if is_running_on_azure():
+                            save_scratchpad_db_to_blob(user_id, scratchpad_mgr.db_path)
+
+                    # Delete chat conversations
                     for chat_id in st.session_state.chats_to_delete:
                         if chat_id in st.session_state.user_data["conversations"]:
                             del st.session_state.user_data["conversations"][chat_id]
                         if st.session_state.user_data["active_conversation_id"] == chat_id:
                             st.session_state.user_data["active_conversation_id"] = next(iter(st.session_state.user_data.get("conversations", {})), None)
+
                     st.session_state.chats_to_delete = []
                     save_user_data(st.session_state.user_id, st.session_state.user_data)
                     st.rerun()
@@ -11239,8 +12128,16 @@ with st.sidebar:
                     label = f"▶ {scratchpad_icon}{title}" if is_active else f"{scratchpad_icon}{title}"
                     if st.button(label, key=f"chat_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
                         st.session_state.user_data["active_conversation_id"] = chat_id
-                        # Restore the persona that was used for this chat
-                        st.session_state.last_persona_selected = persona_name
+
+                        # Restore all chat settings (persona, KBs, upload settings)
+                        restore_chat_settings(chat_id, st.session_state.user_data)
+
+                        # Clear workflow flags when switching to a different chat
+                        st.session_state.workflow_interrupted = False
+                        st.session_state.message_processed = False
+                        st.session_state.is_generating = False
+                        st.session_state.workflow_ready_to_start = False
+                        # Note: Keep workflow_incomplete to allow resuming incomplete work in the switched-to chat
                         # Set flag to auto-scroll after rendering
                         st.session_state.should_scroll_to_bottom = True
                         st.rerun()
@@ -11251,6 +12148,7 @@ with st.sidebar:
 
 
 # =========================== MAIN CHAT ===========================
+# Note: chat settings already restored before sidebar (line 11173)
 active_chat_id = st.session_state.user_data.get("active_conversation_id")
 if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
     active_persona = st.session_state.user_data["conversations"][active_chat_id][0].get("persona_name", "Persona")
@@ -11304,7 +12202,68 @@ if active_chat_id and ("scratchpad_manager" not in st.session_state or st.sessio
 for i, m in enumerate(messages):
     if m["role"] == "system": continue
     with st.chat_message(m["role"]):
+        # Create a unique ID for this message
+        msg_id = f"msg_{active_chat_id}_{i}"
+
+        # Render actual message content (this processes markdown properly)
         st.markdown(m["content"])
+
+        # Add copy button only for assistant messages
+        if m["role"] == "assistant":
+            import html
+            content_html = html.escape(m["content"])
+
+            # Use components.html to avoid markdown processing issues
+            st.components.v1.html(f"""
+            <textarea id="content_{msg_id}" style="position: absolute; left: -9999px;">{content_html}</textarea>
+            <button onclick="copyMsg_{msg_id}()"
+                    id="copy_btn_{msg_id}"
+                    style="position: fixed;
+                           top: 80px;
+                           right: 20px;
+                           z-index: 9999;
+                           background: rgba(0, 0, 0, 0.2);
+                           color: rgba(255, 255, 255, 0.9);
+                           border: 1px solid rgba(255, 255, 255, 0.2);
+                           padding: 6px 10px;
+                           border-radius: 4px;
+                           cursor: pointer;
+                           font-size: 11px;
+                           font-family: monospace;
+                           box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+                           backdrop-filter: blur(4px);
+                           transition: all 0.2s ease;
+                           display: none;">
+                Copy
+            </button>
+            <style>
+            [data-testid="stChatMessage"]:hover #copy_btn_{msg_id} {{
+                display: block !important;
+            }}
+            </style>
+            <script>
+            function copyMsg_{msg_id}() {{
+                const textarea = document.getElementById("content_{msg_id}");
+                const btn = document.getElementById("copy_btn_{msg_id}");
+
+                navigator.clipboard.writeText(textarea.value).then(() => {{
+                    btn.textContent = "✓ Copied!";
+                    btn.style.background = "rgba(33, 150, 243, 0.9)";
+                    setTimeout(() => {{
+                        btn.textContent = "Copy";
+                        btn.style.background = "rgba(0, 0, 0, 0.2)";
+                    }}, 2000);
+                }}).catch(err => {{
+                    btn.textContent = "Failed";
+                    btn.style.background = "rgba(244, 67, 54, 0.9)";
+                    setTimeout(() => {{
+                        btn.textContent = "Copy";
+                        btn.style.background = "rgba(0, 0, 0, 0.2)";
+                    }}, 2000);
+                }});
+            }}
+            </script>
+            """, height=0)
         if m["role"] == "assistant" and i == len(messages) - 1 and "Would you like me to save this" not in m["content"]:
             if st.button("✅ Save as Verified Fact", key=f"save_fact_{active_chat_id}"):
                 last_user_question = messages[i-1]["content"] if i > 0 else ""
@@ -11385,14 +12344,6 @@ if should_process:
         st.session_state.is_generating = False
 
     with st.chat_message("assistant"):
-        # Only show stop button while actively generating
-        if st.session_state.is_generating:
-            stop_button_col1, stop_button_col2 = st.columns([0.85, 0.15])
-            with stop_button_col2:
-                if st.button("⏹️ Stop", key="stop_generation_button", type="secondary", use_container_width=True):
-                    st.session_state.stop_generation = True
-                    st.rerun()
-
         # Check if we have preserved work from previous run
         # Check both session_state (current session) and conversation metadata (persisted)
         workflow_state = messages[0].get("workflow_state", {})
@@ -11498,6 +12449,14 @@ Your next prompt will resume with all this context intact.""")
             data_placeholder = st.empty()
             plots_placeholder = st.empty()
             log_viewer_placeholder = st.empty()
+
+        # Stop button positioned on the right, aligned with loop indicator
+        if persona_type == "agentic" and st.session_state.get("is_generating", False):
+            loop_stop_col1, loop_stop_col2 = st.columns([0.85, 0.15])
+            with loop_stop_col2:
+                if st.button("⏹️ Stop", key="stop_generation_button", type="secondary", use_container_width=True):
+                    st.session_state.stop_generation = True
+                    st.rerun()
 
         # Final answer appears AFTER all expanders (at bottom of message)
         final_answer_placeholder = st.empty()
@@ -12191,7 +13150,18 @@ Your next prompt will resume with all this context intact.""")
         # 1) Agentic personas stay agentic
         if persona_type == "agentic":
             logger.info(f"=== AGENTIC WORKFLOW ACTIVATED === User prompt: {user_prompt[:100]}...")
-            st.session_state.is_generating = True
+
+            # Two-pass approach to show stop button before starting workflow
+            if "workflow_ready_to_start" not in st.session_state:
+                st.session_state.workflow_ready_to_start = False
+
+            if not st.session_state.workflow_ready_to_start:
+                # First pass: Set is_generating flag and rerun to show stop button
+                st.session_state.is_generating = True
+                st.session_state.workflow_ready_to_start = True
+                st.rerun()
+
+            # Second pass: Actually start the workflow (stop button is now visible)
             try:
                 final_answer = run_agentic_workflow(
                     user_prompt,
@@ -12204,10 +13174,18 @@ Your next prompt will resume with all this context intact.""")
                 save_user_data(st.session_state.user_id, st.session_state.user_data)
                 st.session_state.session_rag_context = ""
                 st.session_state.rag_file_status = None
+
+                # Workflow completed successfully - clear all flags and rerun to hide stop button
+                st.session_state.is_generating = False
+                st.session_state.workflow_ready_to_start = False
+                # Rerun to refresh UI and hide stop button
+                st.rerun()
             except Exception as e:
                 st.error(f"An error occurred in the agentic workflow: {e}")
-            finally:
+                # On error, clear flags and rerun to hide stop button
                 st.session_state.is_generating = False
+                st.session_state.workflow_ready_to_start = False
+                st.rerun()
             # Removed st.stop() - let chat input render at bottom
 
         # 2) Fact correction (all personas)
@@ -12250,11 +13228,11 @@ Your next prompt will resume with all this context intact.""")
 
         # 3) KB intent → RAG (for ANY non-agentic persona, e.g., Pirate)
         # Warn if RAG mode is on but no databases selected
-        if intent == "knowledge_base_query" and not selected_kbs:
+        if intent == "knowledge_base_query" and not selected_kbs and persona_type != "agentic":
             st.warning("⚠️ **RAG Mode is enabled but no knowledge bases are selected!**\n\nPlease select at least one database from the sidebar under 'Select Knowledge Bases' to search your data.")
             logger.warning("RAG mode enabled but no knowledge bases selected")
 
-        if intent == "knowledge_base_query" and selected_kbs:
+        if intent == "knowledge_base_query" and selected_kbs and persona_type != "agentic":
             logger.info(f"=== AGENTIC RAG ACTIVATED === User prompt: {user_prompt[:100]}...")
             st.session_state.is_generating = True
             try:
@@ -12982,7 +13960,41 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         output_content.append(f"### {section_name}\n{content}")
                 if output_content:
-                    st.markdown("\n\n".join(output_content))
+                    full_output = "\n\n".join(output_content)
+                    # Add copy button
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_output()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_output">
+                            📋 Copy
+                        </button>
+                    </div>
+                    <script>
+                    function copyScratchpad_output() {{
+                        var textToCopy = `{full_output.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_output");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{
+                                btn.innerHTML = "📋 Copy";
+                                btn.style.background = "rgba(0, 0, 0, 0.2)";
+                            }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_output)
                 else:
                     st.caption("No content yet")
 
@@ -12996,7 +14008,40 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         research_content.append(f"### {section_name}\n{content}")
                 if research_content:
-                    st.markdown("\n\n".join(research_content))
+                    full_research = "\n\n".join(research_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_research()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_research">
+                            📋 Copy
+                        </button>
+                    </div>
+                    <script>
+                    function copyScratchpad_research() {{
+                        var textToCopy = `{full_research.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_research");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{
+                                btn.innerHTML = "📋 Copy";
+                                btn.style.background = "rgba(0, 0, 0, 0.2)";
+                            }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_research)
                 else:
                     st.caption("No content yet")
 
@@ -13010,7 +14055,35 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         outline_content.append(f"### {section_name}\n{content}")
                 if outline_content:
-                    st.markdown("\n\n".join(outline_content))
+                    full_outline = "\n\n".join(outline_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_outline()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_outline">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_outline() {{
+                        var textToCopy = `{full_outline.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_outline");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_outline)
                 else:
                     st.caption("No content yet")
 
@@ -13024,7 +14097,35 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         format_content.append(f"### {section_name}\n{content}")
                 if format_content:
-                    st.markdown("\n\n".join(format_content))
+                    full_format = "\n\n".join(format_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_format()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_format">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_format() {{
+                        var textToCopy = `{full_format.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_format");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_format)
                 else:
                     st.caption("No content yet")
 
@@ -13038,7 +14139,35 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         tables_content.append(f"### {section_name}\n{content}")
                 if tables_content:
-                    st.markdown("\n\n".join(tables_content))
+                    full_tables = "\n\n".join(tables_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_tables()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_tables">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_tables() {{
+                        var textToCopy = `{full_tables.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_tables");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_tables)
                 else:
                     st.caption("No content yet")
 
@@ -13052,7 +14181,35 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         data_content.append(f"### {section_name}\n{content}")
                 if data_content:
-                    st.markdown("\n\n".join(data_content))
+                    full_data = "\n\n".join(data_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_data()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_data">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_data() {{
+                        var textToCopy = `{full_data.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_data");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_data)
                 else:
                     st.caption("No content yet")
 
@@ -13066,7 +14223,35 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         plots_content.append(f"### {section_name}\n{content}")
                 if plots_content:
-                    st.markdown("\n\n".join(plots_content))
+                    full_plots = "\n\n".join(plots_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_plots()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_plots">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_plots() {{
+                        var textToCopy = `{full_plots.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_plots");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_plots)
                 else:
                     st.caption("No content yet")
 
@@ -13080,6 +14265,34 @@ if "scratchpad_manager" in st.session_state:
                     if content:
                         log_content.append(f"### {section_name}\n{content}")
                 if log_content:
-                    st.markdown("\n\n".join(log_content))
+                    full_log = "\n\n".join(log_content)
+                    st.markdown(f"""
+                    <div style="text-align: right; margin-bottom: 10px;">
+                        <button onclick="copyScratchpad_log()"
+                                style="background: rgba(0, 0, 0, 0.2);
+                                       color: rgba(255, 255, 255, 0.9);
+                                       border: 1px solid rgba(255, 255, 255, 0.2);
+                                       padding: 6px 10px;
+                                       border-radius: 4px;
+                                       cursor: pointer;
+                                       font-size: 11px;
+                                       transition: all 0.2s ease;"
+                                onmouseover="this.style.background='rgba(0, 0, 0, 0.6)'"
+                                onmouseout="this.style.background='rgba(0, 0, 0, 0.2)'"
+                                id="copy_log">📋 Copy</button>
+                    </div>
+                    <script>
+                    function copyScratchpad_log() {{
+                        var textToCopy = `{full_log.replace('`', '\\`').replace('$', '\\$')}`;
+                        navigator.clipboard.writeText(textToCopy).then(function() {{
+                            var btn = document.getElementById("copy_log");
+                            btn.innerHTML = "✓ Copied!";
+                            btn.style.background = "rgba(33, 150, 243, 0.9)";
+                            setTimeout(function() {{ btn.innerHTML = "📋 Copy"; btn.style.background = "rgba(0, 0, 0, 0.2)"; }}, 2000);
+                        }});
+                    }}
+                    </script>
+                    """, unsafe_allow_html=True)
+                    st.markdown(full_log)
                 else:
                     st.caption("No content yet")
