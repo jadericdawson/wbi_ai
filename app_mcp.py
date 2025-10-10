@@ -13961,6 +13961,8 @@ if "scratchpad_manager" in st.session_state:
                         output_content.append(f"### {section_name}\n{content}")
                 if output_content:
                     full_output = "\n\n".join(output_content)
+                    # Escape backticks and dollar signs for JavaScript template literal
+                    escaped_output = full_output.replace('`', r'\`').replace('$', r'\$')
                     # Add copy button
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
@@ -13981,7 +13983,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_output() {{
-                        var textToCopy = `{full_output.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_output}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_output");
                             btn.innerHTML = "✓ Copied!";
@@ -14009,6 +14011,7 @@ if "scratchpad_manager" in st.session_state:
                         research_content.append(f"### {section_name}\n{content}")
                 if research_content:
                     full_research = "\n\n".join(research_content)
+                    escaped_research = full_research.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_research()"
@@ -14028,7 +14031,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_research() {{
-                        var textToCopy = `{full_research.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_research}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_research");
                             btn.innerHTML = "✓ Copied!";
@@ -14056,6 +14059,7 @@ if "scratchpad_manager" in st.session_state:
                         outline_content.append(f"### {section_name}\n{content}")
                 if outline_content:
                     full_outline = "\n\n".join(outline_content)
+                    escaped_outline = full_outline.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_outline()"
@@ -14073,7 +14077,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_outline() {{
-                        var textToCopy = `{full_outline.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_outline}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_outline");
                             btn.innerHTML = "✓ Copied!";
@@ -14098,6 +14102,7 @@ if "scratchpad_manager" in st.session_state:
                         format_content.append(f"### {section_name}\n{content}")
                 if format_content:
                     full_format = "\n\n".join(format_content)
+                    escaped_format = full_format.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_format()"
@@ -14115,7 +14120,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_format() {{
-                        var textToCopy = `{full_format.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_format}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_format");
                             btn.innerHTML = "✓ Copied!";
@@ -14140,6 +14145,7 @@ if "scratchpad_manager" in st.session_state:
                         tables_content.append(f"### {section_name}\n{content}")
                 if tables_content:
                     full_tables = "\n\n".join(tables_content)
+                    escaped_tables = full_tables.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_tables()"
@@ -14157,7 +14163,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_tables() {{
-                        var textToCopy = `{full_tables.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_tables}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_tables");
                             btn.innerHTML = "✓ Copied!";
@@ -14182,6 +14188,7 @@ if "scratchpad_manager" in st.session_state:
                         data_content.append(f"### {section_name}\n{content}")
                 if data_content:
                     full_data = "\n\n".join(data_content)
+                    escaped_data = full_data.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_data()"
@@ -14199,7 +14206,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_data() {{
-                        var textToCopy = `{full_data.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_data}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_data");
                             btn.innerHTML = "✓ Copied!";
@@ -14224,6 +14231,7 @@ if "scratchpad_manager" in st.session_state:
                         plots_content.append(f"### {section_name}\n{content}")
                 if plots_content:
                     full_plots = "\n\n".join(plots_content)
+                    escaped_plots = full_plots.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_plots()"
@@ -14241,7 +14249,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_plots() {{
-                        var textToCopy = `{full_plots.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_plots}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_plots");
                             btn.innerHTML = "✓ Copied!";
@@ -14266,6 +14274,7 @@ if "scratchpad_manager" in st.session_state:
                         log_content.append(f"### {section_name}\n{content}")
                 if log_content:
                     full_log = "\n\n".join(log_content)
+                    escaped_log = full_log.replace('`', r'\`').replace('$', r'\$')
                     st.markdown(f"""
                     <div style="text-align: right; margin-bottom: 10px;">
                         <button onclick="copyScratchpad_log()"
@@ -14283,7 +14292,7 @@ if "scratchpad_manager" in st.session_state:
                     </div>
                     <script>
                     function copyScratchpad_log() {{
-                        var textToCopy = `{full_log.replace('`', '\\`').replace('$', '\\$')}`;
+                        var textToCopy = `{escaped_log}`;
                         navigator.clipboard.writeText(textToCopy).then(function() {{
                             var btn = document.getElementById("copy_log");
                             btn.innerHTML = "✓ Copied!";
