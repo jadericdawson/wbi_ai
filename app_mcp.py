@@ -1922,9 +1922,9 @@ class CosmosUploader:
         import numpy as np
 
         if isinstance(obj, dict):
-            return {k: CosmosManager.sanitize_for_cosmos(v) for k, v in obj.items()}
+            return {k: CosmosUploader.sanitize_for_cosmos(v) for k, v in obj.items()}
         elif isinstance(obj, list):
-            return [CosmosManager.sanitize_for_cosmos(item) for item in obj]
+            return [CosmosUploader.sanitize_for_cosmos(item) for item in obj]
         elif isinstance(obj, float):
             if math.isnan(obj) or math.isinf(obj):
                 return None  # Replace NaN/Infinity with None
@@ -1937,7 +1937,7 @@ class CosmosUploader:
             return val
         elif isinstance(obj, np.ndarray):
             # Convert numpy arrays to lists
-            return [CosmosManager.sanitize_for_cosmos(item) for item in obj.tolist()]
+            return [CosmosUploader.sanitize_for_cosmos(item) for item in obj.tolist()]
         elif isinstance(obj, (datetime.datetime, datetime.date)):
             # Convert datetime to ISO format string
             return obj.isoformat()
@@ -5235,7 +5235,7 @@ def process_uploaded_file(uploaded_file, cosmos_manager=None, parent_doc_id=None
 
     Args:
         uploaded_file: Streamlit uploaded file object
-        cosmos_manager: Optional CosmosManager for incremental lead enrichment
+        cosmos_manager: Optional CosmosUploader for incremental lead enrichment
         parent_doc_id: Optional parent document ID
 
     Returns: {
@@ -5915,7 +5915,7 @@ def transcribe_m4a_audio(file_bytes: bytes) -> str:
         return ""
 
 # =========================== MULTI-AGENT FRAMEWORK ===========================
-MAX_LOOPS = 50  # Increased from 20 to allow for complete, comprehensive reports
+MAX_LOOPS = 100  # Increased from 50 to allow for complete, comprehensive reports
 
 # =========================== SCRATCHPAD MANAGER ===========================
 class ScratchpadManager:
@@ -6485,15 +6485,15 @@ class ScratchpadManager:
     def add_citation(self, source_doc: dict) -> str:
         """
         Add a citation from a source document retrieved from CosmosDB.
-        Generates a unique citation key (e.g., "Smith2024", "Doe2023a").
+        Generates a unique citation key based on shortened filename (e.g., "RFP_2024", "SOW_Analysis").
 
         Args:
             source_doc: Dictionary containing document metadata from CosmosDB
                 Expected fields: id, title, authors, date, source_type, url,
-                                container_name, database_name, etc.
+                                container_name, database_name, metadata.original_filename, etc.
 
         Returns:
-            Citation key (e.g., "Smith2024") to use for inline citations
+            Citation key (e.g., "RFP_2024") to use for inline citations
         """
         import re
 
@@ -6506,27 +6506,39 @@ class ScratchpadManager:
         url = source_doc.get("url", source_doc.get("file_path", ""))
         container = source_doc.get("container_name", "")
         database = source_doc.get("database_name", "")
+        
+        # Get original filename from metadata
+        original_filename = ""
+        metadata = source_doc.get("metadata", {})
+        if isinstance(metadata, dict):
+            original_filename = metadata.get("original_filename", "")
+        elif isinstance(metadata, str):
+            # Sometimes metadata is stringified JSON
+            try:
+                import json
+                meta_dict = json.loads(metadata)
+                original_filename = meta_dict.get("original_filename", "")
+            except:
+                pass
+        
+        # Fallback to title or doc_id for filename
+        if not original_filename:
+            original_filename = title if title != "Untitled" else doc_id
 
-        # Generate citation key: FirstAuthorLastNameYear (e.g., "Smith2024")
-        # Extract year from date
-        year = ""
-        if date:
-            year_match = re.search(r'(19|20)\d{2}', str(date))
-            if year_match:
-                year = year_match.group(0)
-
-        # Extract first author's last name
-        author_key = "Unknown"
-        if authors and authors != "Unknown":
-            # Handle various author formats: "Last, First", "First Last", "Last et al."
-            author_str = str(authors).split(';')[0].split(',')[0].split(' and ')[0].strip()
-            # Get last word as last name
-            parts = author_str.split()
-            if parts:
-                author_key = re.sub(r'[^A-Za-z]', '', parts[-1])  # Remove non-letters
-
-        # Generate base citation key
-        base_key = f"{author_key}{year}" if year else author_key
+        # Generate citation key from filename
+        if original_filename:
+            # Remove file extension and clean up
+            filename_base = re.sub(r'\.[^.]+$', '', original_filename)  # Remove extension
+            # Keep only alphanumeric and underscores, replace spaces and dashes with underscores
+            filename_clean = re.sub(r'[^A-Za-z0-9_]', '_', filename_base)
+            # Remove consecutive underscores and trim
+            filename_clean = re.sub(r'_+', '_', filename_clean).strip('_')
+            # Limit length to 20 characters for readability
+            if len(filename_clean) > 20:
+                filename_clean = filename_clean[:20].rstrip('_')
+            base_key = filename_clean if filename_clean else "Document"
+        else:
+            base_key = "Document"
 
         # Check if this key already exists
         conn = sqlite3.connect(self.db_path)
@@ -6660,11 +6672,37 @@ class ScratchpadManager:
         bibliography = "## References\n\n"
 
         for cite in citations:
-            authors = cite.get("authors", "Unknown")
+            citation_key = cite.get("citation_key", "Unknown")
+            authors = cite.get("authors", "")
             date = cite.get("date", "n.d.")
             title = cite.get("title", "Untitled")
             url = cite.get("url", "")
             source_type = cite.get("source_type", "document")
+            container_name = cite.get("container_name", "")
+            database_name = cite.get("database_name", "")
+            document_id = cite.get("document_id", "")
+            
+            # Get additional metadata from the additional_metadata field
+            additional_metadata = {}
+            if cite.get("additional_metadata"):
+                try:
+                    import json
+                    additional_metadata = json.loads(cite.get("additional_metadata", "{}"))
+                except:
+                    pass
+            
+            # Get original filename from metadata
+            original_filename = ""
+            metadata = additional_metadata.get("metadata", {})
+            if isinstance(metadata, dict):
+                original_filename = metadata.get("original_filename", "")
+            elif isinstance(metadata, str):
+                try:
+                    import json
+                    meta_dict = json.loads(metadata)
+                    original_filename = meta_dict.get("original_filename", "")
+                except:
+                    pass
 
             # Extract year from date if available
             import re
@@ -6674,33 +6712,64 @@ class ScratchpadManager:
                 if year_match:
                     year = year_match.group(0)
 
-            # Format based on style
+            # Use original filename as the primary title if available
+            display_title = original_filename if original_filename else title
+            
+            # Format based on style - enhanced for document citations
             if style == "APA":
-                # APA: Authors (Year). Title. URL
-                entry = f"{authors} ({year}). *{title}*."
-                if url:
+                # APA format with document details
+                if authors and authors != "Unknown" and authors.strip():
+                    entry = f"{authors} ({year}). *{display_title}*."
+                else:
+                    entry = f"*{display_title}* ({year})."
+                
+                # Add source information
+                if container_name and database_name:
+                    entry += f" Retrieved from {database_name}/{container_name}."
+                elif url:
                     entry += f" {url}"
+                    
             elif style == "MLA":
-                # MLA: Authors. "Title." Year. URL
-                entry = f'{authors}. "{title}." {year}.'
-                if url:
-                    entry += f" {url}"
+                # MLA format with document details
+                if authors and authors != "Unknown" and authors.strip():
+                    entry = f'{authors}. "{display_title}." {year}.'
+                else:
+                    entry = f'"{display_title}." {year}.'
+                
+                if container_name and database_name:
+                    entry += f" {database_name}/{container_name}."
+                elif url:
+                    entry += f" Web. {url}"
+                    
             elif style == "Chicago":
-                # Chicago: Authors. "Title." Year. URL
-                entry = f'{authors}. "{title}." {year}.'
-                if url:
+                # Chicago format with document details
+                if authors and authors != "Unknown" and authors.strip():
+                    entry = f'{authors}. "{display_title}." {year}.'
+                else:
+                    entry = f'"{display_title}." {year}.'
+                
+                if container_name and database_name:
+                    entry += f" {database_name}/{container_name}."
+                elif url:
                     entry += f" {url}"
+                    
             elif style == "IEEE":
-                # IEEE: [N] Authors, "Title," Year. [Online]. Available: URL
+                # IEEE format with document details
                 idx = citations.index(cite) + 1
-                entry = f"[{idx}] {authors}, \"{title},\" {year}."
-                if url:
+                if authors and authors != "Unknown" and authors.strip():
+                    entry = f"[{idx}] {authors}, \"{display_title},\" {year}."
+                else:
+                    entry = f"[{idx}] \"{display_title},\" {year}."
+                
+                if container_name and database_name:
+                    entry += f" Available: {database_name}/{container_name}."
+                elif url:
                     entry += f" [Online]. Available: {url}"
             else:
                 # Default format
                 entry = f"{authors} ({year}). {title}. {url}"
 
-            bibliography += f"- **[{cite['citation_key']}]** {entry}\n\n"
+            bibliography += f"- **[{citation_key}]** {entry}\n\n"
 
         return bibliography
 
@@ -6757,7 +6826,7 @@ Available pads: output, research, tables, plots, outline, data, log
 - scratchpad_cleanup_formatting(pad_name: str, section_name: str): Fix common formatting issues (LaTeX escaping, spacing). Call after writing content to ensure clean markdown.
 
 **CITATION MANAGEMENT:**
-- add_citation(source_doc: dict): Add a citation from a source document. Returns citation key (e.g., "Smith2024"). Pass the full document dict from search results.
+- add_citation(source_doc: dict): Add a citation from a source document. Returns filename-based citation key (e.g., "RFP_Analysis", "SOW_Requirements"). Pass the full document dict from search results.
 - get_citation(citation_key: str): Retrieve citation metadata by key.
 - get_all_citations(): Get list of all citations in current session.
 - format_bibliography(style: str = "APA"): Generate formatted bibliography. Styles: "APA", "MLA", "Chicago", "IEEE".
@@ -7748,11 +7817,12 @@ AGENT_PERSONAS = {
        - **CITATION TRACKING** (CRITICAL):
          * When extracting findings from search results, you MUST track source documents
          * Get cached search results to access full document metadata
-         * For each document used, call: scratchpad_manager.add_citation(source_doc)
+         * For each document used, call: add_citation(source_doc) to get the citation key
          * Include inline citations in your extracted text using the format: [CitationKey]
-         * Example: "The F-35 program requires 2,500 additional maintenance personnel [Smith2024]."
-         * The citation key will be auto-generated (e.g., "Smith2024", "Doe2023a")
+         * Example: "The F-35 program requires 2,500 additional maintenance personnel [RFP_Analysis]."
+         * The citation key will be auto-generated from filename (e.g., "RFP_Analysis", "SOW_Requirements")
          * **Citations are MANDATORY** - all factual claims must be cited
+         * **FORBIDDEN**: Manual citations like [Unknown], [Source1], [Document] - use add_citation() tool only
 
     6. **RESPONSE FORMAT - TOOL CALLS ONLY, NEVER TEXT RESPONSES**:
        - You MUST respond with: `{{"tool_use": {{"name": "tool_name", "params": {{"arg1": "value1", ...}}}}}}`
@@ -8329,6 +8399,9 @@ AGENT_PERSONAS = {
         - **FORBIDDEN**: Inventing project names, dates, organizations, objectives, or any other details
         - **FORBIDDEN**: Making assumptions about what "probably" exists or "should" be true
         - **REQUIRED**: Every factual claim MUST have a citation [source_name] that exists in RESEARCH pad
+        - **CITATION PROCESS**: When writing facts from search results, you MUST call add_citation(source_doc) to get proper citation keys
+        - **FORBIDDEN**: Manual citation formatting like [Unknown], [Source1], [Document] - these are INVALID
+        - **REQUIRED**: Only use citation keys returned from add_citation() tool calls
         - **REQUIRED**: If RESEARCH says "no data found" or "no numbers available", your OUTPUT must reflect that absence - do NOT fill gaps with speculation
         - **Example of CORRECT writing**: "The March 29, 2023 HASC hearing confirmed maintainer shortages exist but provided no specific numbers [hasc_29mar2023]"
         - **Example of FORBIDDEN writing**: "Launched in early 2025..." (inventing dates), "Air Force Life Cycle Management Center sponsorship" (inventing organizations)
@@ -10385,6 +10458,7 @@ Your next prompt will resume from this exact point with all context and work pre
 
                 # Set flag to indicate workflow is incomplete - scratchpads should be preserved
                 st.session_state.workflow_incomplete = True
+                st.session_state.message_processed = False  # Reset to allow processing new messages
 
                 # Save workflow state to conversation metadata
                 if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
@@ -13159,6 +13233,7 @@ Your next prompt will resume with all this context intact.""")
                 # First pass: Set is_generating flag and rerun to show stop button
                 st.session_state.is_generating = True
                 st.session_state.workflow_ready_to_start = True
+                st.session_state.message_processed = False  # Reset to allow second pass processing
                 st.rerun()
 
             # Second pass: Actually start the workflow (stop button is now visible)
