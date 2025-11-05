@@ -9833,31 +9833,37 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
 
                     logger.warning(f"🔄 Rate limit hit for {call_type} call. Waiting exactly {retry_delay} seconds (+0.5s buffer) as requested by Azure... (attempt {attempt + 1}/{max_retries})")
 
-                    # Show progress bar if container provided
+                    # Show progress bar if container provided (only works in main thread)
                     if progress_container:
-                        with progress_container:
-                            progress_bar = st.progress(0.0)
-                            status_text = st.empty()
+                        try:
+                            with progress_container:
+                                progress_bar = st.progress(0.0)
+                                status_text = st.empty()
 
-                            # Countdown with progress bar
-                            start_time = time.time()
-                            while True:
-                                elapsed = time.time() - start_time
-                                remaining = max(0, retry_delay_with_buffer - elapsed)
+                                # Countdown with progress bar
+                                start_time = time.time()
+                                while True:
+                                    elapsed = time.time() - start_time
+                                    remaining = max(0, retry_delay_with_buffer - elapsed)
 
-                                if remaining <= 0:
-                                    break
+                                    if remaining <= 0:
+                                        break
 
-                                # Update progress (inverted - starts at 0%, goes to 100%)
-                                progress = min(1.0, elapsed / retry_delay_with_buffer)
-                                progress_bar.progress(progress)
-                                status_text.text(f"⏳ Rate limit: Waiting {remaining:.1f}s (Azure requested {retry_delay}s)")
+                                    # Update progress (inverted - starts at 0%, goes to 100%)
+                                    progress = min(1.0, elapsed / retry_delay_with_buffer)
+                                    progress_bar.progress(progress)
+                                    status_text.text(f"⏳ Rate limit: Waiting {remaining:.1f}s (Azure requested {retry_delay}s)")
 
-                                time.sleep(0.1)  # Update every 100ms
+                                    time.sleep(0.1)  # Update every 100ms
 
-                            # Clear progress bar when done
-                            progress_bar.empty()
-                            status_text.empty()
+                                # Clear progress bar when done
+                                progress_bar.empty()
+                                status_text.empty()
+                        except Exception as ui_error:
+                            # NoSessionContext error when called from background thread
+                            # Fall back to simple sleep
+                            logger.debug(f"Progress bar not available in this context ({type(ui_error).__name__}), using simple sleep")
+                            time.sleep(retry_delay_with_buffer)
                     else:
                         # No progress container - just sleep
                         time.sleep(retry_delay_with_buffer)
@@ -11038,8 +11044,8 @@ Use all the information above to compile the final answer."""}
                                 o3_client,
                                 o3_deployment,
                                 context_limits,
-                                display_scratchpad,
-                                query_expander  # Pass query_expander for progress bar display
+                                display_scratchpad
+                                # Note: progress_container not passed in parallel mode - Streamlit UI doesn't work in threads
                             )
                             future_to_task[future] = task_obj
 
