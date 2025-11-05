@@ -9527,10 +9527,12 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
 
 def make_api_call_with_context_recovery(client, model, messages, response_format, call_type="orchestrator"):
     """
-    Make an API call with automatic context length recovery.
+    Make an API call with automatic context length recovery and rate limit handling.
 
     If context limit is exceeded, reduces context limits by 50% and raises an exception
     to signal that the caller should rebuild messages and retry.
+
+    If rate limit (429) is hit, implements exponential backoff retry logic.
 
     Args:
         client: OpenAI client instance
@@ -9545,41 +9547,59 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
     Raises:
         ContextLengthExceededError: With reduced limits, caller should rebuild messages and retry
     """
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            response_format=response_format
-        )
-        return response
-    except Exception as e:
-        error_str = str(e)
-        # Check for context length errors (various forms)
-        if "context_length" in error_str.lower() or "maximum context length" in error_str.lower() or ("400" in error_str and "token" in error_str.lower()):
-            # Reduce all context limits by 50%
-            if "context_limit_chars" not in st.session_state:
-                st.session_state.context_limit_chars = {
-                    "research": 240000,  # ~60K tokens
-                    "outline": 80000,    # ~20K tokens
-                    "output": 240000,    # ~60K tokens
-                    "data": 160000,      # ~40K tokens
-                    "log": 80000,        # ~20K tokens
-                    "display": 160000    # ~40K tokens
-                }  # Updated for O3's 200k token context (GPT-4.1 has 1M)
+    max_retries = 3
+    base_delay = 2  # Start with 2 seconds
 
-            context_limits = st.session_state.context_limit_chars
-            for key in context_limits:
-                context_limits[key] = int(context_limits[key] * 0.5)
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                response_format=response_format
+            )
+            return response
+        except Exception as e:
+            error_str = str(e)
 
-            st.session_state.context_limit_chars = context_limits
+            # Check for rate limit errors (429)
+            if "429" in error_str or "rate limit" in error_str.lower():
+                if attempt < max_retries - 1:
+                    # Exponential backoff: 2s, 4s, 8s
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(f"Rate limit hit for {call_type} call. Retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(delay)
+                    continue
+                else:
+                    # Max retries reached, raise the error
+                    logger.error(f"Rate limit exceeded after {max_retries} attempts for {call_type} call")
+                    raise
 
-            logger.warning(f"Context limit exceeded for {call_type} call. Reduced limits to: {context_limits}")
+            # Check for context length errors (various forms)
+            elif "context_length" in error_str.lower() or "maximum context length" in error_str.lower() or ("400" in error_str and "token" in error_str.lower()):
+                # Reduce all context limits by 50%
+                if "context_limit_chars" not in st.session_state:
+                    st.session_state.context_limit_chars = {
+                        "research": 240000,  # ~60K tokens
+                        "outline": 80000,    # ~20K tokens
+                        "output": 240000,    # ~60K tokens
+                        "data": 160000,      # ~40K tokens
+                        "log": 80000,        # ~20K tokens
+                        "display": 160000    # ~40K tokens
+                    }  # Updated for O3's 200k token context (GPT-4.1 has 1M)
 
-            # Raise a special exception to signal retry needed
-            raise RuntimeError(f"CONTEXT_LIMIT_EXCEEDED:{call_type}") from e
-        else:
-            # Re-raise other errors as-is
-            raise
+                context_limits = st.session_state.context_limit_chars
+                for key in context_limits:
+                    context_limits[key] = int(context_limits[key] * 0.5)
+
+                st.session_state.context_limit_chars = context_limits
+
+                logger.warning(f"Context limit exceeded for {call_type} call. Reduced limits to: {context_limits}")
+
+                # Raise a special exception to signal retry needed
+                raise RuntimeError(f"CONTEXT_LIMIT_EXCEEDED:{call_type}") from e
+            else:
+                # Re-raise other errors as-is
+                raise
 
 
 # Helper function for executing a single agent task
@@ -9662,6 +9682,11 @@ You have access to all scratchpad tools for reading and writing."""
                     call_type="agent"
                 )
                 agent_output = json.loads(response.choices[0].message.content)
+                # Ensure agent_output is a dict, not a list
+                if not isinstance(agent_output, dict):
+                    agent_output = {
+                        "response": f"Agent returned invalid format (expected dict, got {type(agent_output).__name__}): {str(agent_output)[:200]}"
+                    }
                 result["agent_output"] = agent_output
                 break
             except RuntimeError as e:
@@ -10736,6 +10761,11 @@ You have access to all scratchpad tools for reading and writing."""
                                     call_type="agent"
                                 )
                                 agent_output = json.loads(response.choices[0].message.content)
+                                # Ensure agent_output is a dict, not a list
+                                if not isinstance(agent_output, dict):
+                                    agent_output = {
+                                        "response": f"Agent returned invalid format (expected dict, got {type(agent_output).__name__}): {str(agent_output)[:200]}"
+                                    }
                                 break  # Success
                             except RuntimeError as e:
                                 if "CONTEXT_LIMIT_EXCEEDED" in str(e) and retry_attempt < max_retries - 1:
@@ -10800,6 +10830,11 @@ You have access to all scratchpad tools for reading and writing."""
                                             call_type="tool_agent"
                                         )
                                         agent_output = json.loads(response.choices[0].message.content)
+                                        # Ensure agent_output is a dict, not a list
+                                        if not isinstance(agent_output, dict):
+                                            agent_output = {
+                                                "response": f"Tool Agent returned invalid format (expected dict, got {type(agent_output).__name__}): {str(agent_output)[:200]}"
+                                            }
                                         break
                                     except RuntimeError as e:
                                         if "CONTEXT_LIMIT_EXCEEDED" in str(e) and retry_attempt < max_retries - 1:
