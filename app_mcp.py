@@ -10655,6 +10655,10 @@ Use all the information above to compile the final answer."""}
                     log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                     return final_answer
 
+            # Add delay after orchestrator call to prevent rate limit bursts
+            # This spaces out the orchestrator API call from subsequent agent calls
+            time.sleep(0.5)
+
             # Execute tasks in parallel using ThreadPoolExecutor
             if len(tasks_to_execute) > 1:
                 # Multiple tasks - run in parallel
