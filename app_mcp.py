@@ -1436,11 +1436,25 @@ def load_user_data(user_id):
     default_personas = {
         "General Assistant": {
             "prompt": (
-                "You are a helpful assistant with access to an internal knowledge base. "
-                "Your primary function is to provide answers grounded in the data from that knowledge base. "
-                "Synthesize the retrieved information clearly and concisely. "
-                "If the user has previously used the Multi-Agent Team on this conversation, you may have access to previous work including OUTPUT documents, RESEARCH findings, OUTLINES, and other scratchpad data. Reference this information when relevant to the user's question. "
-                "If no information is found or the retrieved facts are insufficient to answer the question, state that explicitly rather than making assumptions."
+                "You are a helpful assistant with access to an internal knowledge base AND full access to collaborative work from the Multi-Agent Team.\n\n"
+                "**KNOWLEDGE BASE ACCESS:**\n"
+                "- You can search the user's private knowledge base for relevant information\n"
+                "- Synthesize retrieved information clearly and concisely\n"
+                "- Cite sources when referencing specific documents\n\n"
+                "**MULTI-AGENT TEAM COLLABORATION:**\n"
+                "When the user has previously used the Multi-Agent Team in this conversation, you have COMPLETE ACCESS to:\n"
+                "- 📄 OUTPUT Scratchpad: Final documents, reports, and deliverables\n"
+                "- 🔬 RESEARCH Scratchpad: Findings, facts, and data analysis\n"
+                "- 📝 OUTLINE Scratchpad: Structure, plans, and organization\n"
+                "- 📐 FORMAT Scratchpad: Requirements and specifications\n"
+                "- 📊 TABLES Scratchpad: Data visualizations and summaries\n"
+                "- 💾 DATA Scratchpad: Structured data and extracts\n\n"
+                "**YOUR ROLE:**\n"
+                "- Answer questions about the multi-agent team's work by citing specific sections\n"
+                "- Build on previous research and findings\n"
+                "- Help refine or expand on the team's output\n"
+                "- Provide follow-up analysis or clarifications\n\n"
+                "If no relevant information is found in either the knowledge base or scratchpads, state that explicitly rather than making assumptions."
             ),
             "type": "simple",
             "params": {"temperature": 0.7}
@@ -11770,6 +11784,9 @@ def on_persona_change(widget_key):
         save_user_data(st.session_state.user_id, st.session_state.user_data)
         st.session_state.last_persona_selected = sel
 
+        # Show confirmation that persona was switched in-place
+        st.session_state.persona_switched_in_place = True
+
         # DON'T clear workflow flags - allow resuming
         # DON'T create new chat - keep scratchpads accessible
     else:
@@ -12738,6 +12755,17 @@ if not active_chat_id:
 else:
     messages = st.session_state.user_data["conversations"][active_chat_id]
 
+# Show persona switch confirmation if just switched
+if st.session_state.get("persona_switched_in_place"):
+    scratchpad_count = 0
+    if "scratchpad_manager" in st.session_state:
+        scratchpad_mgr = st.session_state.scratchpad_manager
+        for pad in ["output", "research", "outline", "format", "tables", "data"]:
+            scratchpad_count += len(scratchpad_mgr.list_sections(pad))
+
+    st.success(f"✓ Persona switched to **{active_persona}** (previous work from Multi-Agent Team is still accessible - {scratchpad_count} sections)")
+    st.session_state.persona_switched_in_place = False  # Clear flag
+
 # Initialize scratchpad manager for this chat (so sidebar dropdown can always access it)
 if active_chat_id and ("scratchpad_manager" not in st.session_state or st.session_state.get("scratchpad_chat_id") != active_chat_id):
     db_path = get_scratchpad_db_path()
@@ -12955,46 +12983,110 @@ Your next prompt will resume with all this context intact.""")
         # Status container for non-blocking progress updates (appears between search and answer)
         status_container = st.empty()
 
-        # =========================== LIVE SCRATCHPAD VIEWERS ===========================
-        # Only show scratchpads for agentic personas (multi-agent workflows)
-        # General Assistant and simple personas don't need these
+        # =========================== SCRATCHPAD VIEWERS ===========================
+        # Show scratchpads for ALL personas, but with different labels:
+        # - Agentic personas: "Live View" (updating in real-time)
+        # - Simple personas: "Previous Work" (read-only from previous multi-agent runs)
 
         persona_type = st.session_state.user_data["personas"].get(active_persona, {}).get("type", "simple")
 
+        # Check if scratchpads have content from previous work
+        has_previous_work = False
+        if "scratchpad_manager" in st.session_state and persona_type != "agentic":
+            scratchpad_mgr = st.session_state.scratchpad_manager
+            for pad_type in ["output", "research", "outline", "format", "tables", "data"]:
+                if scratchpad_mgr.list_sections(pad_type):
+                    has_previous_work = True
+                    break
+
+        # Show scratchpads with appropriate labels
         if persona_type == "agentic":
-            # OUTPUT viewer (Final Document)
-            output_expander = st.expander("📄 OUTPUT Document - Live View", expanded=False)
+            label_suffix = "Live View"
+            show_viewers = True
+        else:
+            label_suffix = "Previous Work (Read-Only)"
+            show_viewers = has_previous_work  # Only show if there's content
+
+        if show_viewers:
+            # OUTPUT viewer
+            output_expander = st.expander(f"📄 OUTPUT Document - {label_suffix}", expanded=False)
             output_placeholder = output_expander.empty()
 
-            # RESEARCH viewer (Findings & Facts)
-            research_expander = st.expander("🔬 RESEARCH - Live View", expanded=False)
+            # RESEARCH viewer
+            research_expander = st.expander(f"🔬 RESEARCH - {label_suffix}", expanded=False)
             research_placeholder = research_expander.empty()
 
-            # OUTLINE viewer (Structure & Plan)
-            outline_expander = st.expander("📝 OUTLINE - Live View", expanded=False)
+            # OUTLINE viewer
+            outline_expander = st.expander(f"📝 OUTLINE - {label_suffix}", expanded=False)
             outline_placeholder = outline_expander.empty()
 
-            # FORMAT viewer (Submission Requirements)
-            format_expander = st.expander("📐 FORMAT Requirements - Live View", expanded=False)
+            # FORMAT viewer
+            format_expander = st.expander(f"📐 FORMAT Requirements - {label_suffix}", expanded=False)
             format_placeholder = format_expander.empty()
 
-            # TABLES viewer (Data Visualizations)
-            tables_expander = st.expander("📊 TABLES - Live View", expanded=False)
+            # TABLES viewer
+            tables_expander = st.expander(f"📊 TABLES - {label_suffix}", expanded=False)
             tables_placeholder = tables_expander.empty()
 
-            # DATA viewer (Structured Data)
-            data_expander = st.expander("💾 DATA - Live View", expanded=False)
+            # DATA viewer
+            data_expander = st.expander(f"💾 DATA - {label_suffix}", expanded=False)
             data_placeholder = data_expander.empty()
 
-            # PLOTS viewer (Chart Specifications)
-            plots_expander = st.expander("📈 PLOTS - Live View", expanded=False)
+            # PLOTS viewer
+            plots_expander = st.expander(f"📈 PLOTS - {label_suffix}", expanded=False)
             plots_placeholder = plots_expander.empty()
 
-            # LOG viewer (Agent History)
-            log_expander = st.expander("📜 LOG - Live View", expanded=False)
+            # LOG viewer
+            log_expander = st.expander(f"📜 LOG - {label_suffix}", expanded=False)
             log_viewer_placeholder = log_expander.empty()
+
+            # For non-agentic personas, populate the viewers immediately with current content
+            if persona_type != "agentic" and "scratchpad_manager" in st.session_state:
+                scratchpad_mgr = st.session_state.scratchpad_manager
+
+                # Show OUTPUT content
+                output_sections = scratchpad_mgr.list_sections("output")
+                if output_sections:
+                    output_content = scratchpad_mgr.get_full_content("output")
+                    output_placeholder.markdown(output_content)
+
+                # Show RESEARCH content
+                research_sections = scratchpad_mgr.list_sections("research")
+                if research_sections:
+                    research_content = scratchpad_mgr.get_full_content("research")
+                    research_placeholder.markdown(research_content)
+
+                # Show OUTLINE content
+                outline_sections = scratchpad_mgr.list_sections("outline")
+                if outline_sections:
+                    outline_content = scratchpad_mgr.get_full_content("outline")
+                    outline_placeholder.markdown(outline_content)
+
+                # Show FORMAT content
+                format_sections = scratchpad_mgr.list_sections("format")
+                if format_sections:
+                    format_content = scratchpad_mgr.get_full_content("format")
+                    format_placeholder.markdown(format_content)
+
+                # Show TABLES content
+                tables_sections = scratchpad_mgr.list_sections("tables")
+                if tables_sections:
+                    tables_content = scratchpad_mgr.get_full_content("tables")
+                    tables_placeholder.markdown(tables_content)
+
+                # Show DATA content
+                data_sections = scratchpad_mgr.list_sections("data")
+                if data_sections:
+                    data_content = scratchpad_mgr.get_full_content("data")
+                    data_placeholder.markdown(data_content)
+
+                # Show LOG content
+                log_sections = scratchpad_mgr.list_sections("log")
+                if log_sections:
+                    log_content = scratchpad_mgr.get_full_content("log")
+                    log_viewer_placeholder.markdown(log_content)
         else:
-            # For non-agentic personas, create placeholders but don't display expanders
+            # No previous work and not agentic - create empty placeholders
             output_placeholder = st.empty()
             research_placeholder = st.empty()
             outline_placeholder = st.empty()
@@ -14212,20 +14304,23 @@ CRITICAL RULES:
                         sections = scratchpad_mgr.list_sections(pad_type)
                         if sections:
                             pad_content = []
-                            for section_name in sections[:5]:  # Limit to first 5 sections to avoid context bloat
+                            # FULL access - no truncation limits!
+                            for section_name in sections:
                                 content = scratchpad_mgr.read_section(pad_type, section_name)
                                 if content and content.strip():
-                                    # Truncate long sections
-                                    if len(content) > 1000:
-                                        content = content[:1000] + "\n... (truncated)"
                                     pad_content.append(f"## {section_name}\n{content}")
 
                             if pad_content:
                                 scratchpad_context.append(f"### {pad_type.upper()} Scratchpad\n" + "\n\n".join(pad_content))
 
                     if scratchpad_context:
-                        user_context += "\n\n--- Previous Work (from Multi-Agent Team) ---\n" + "\n\n".join(scratchpad_context)
-                        user_context += "\n\nYou can reference this previous work to answer the user's question more effectively."
+                        user_context += "\n\n━━━ Previous Work (from Multi-Agent Team) ━━━\n" + "\n\n".join(scratchpad_context)
+                        user_context += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou have FULL ACCESS to all this previous work. Reference specific sections when answering questions about the multi-agent team's findings, research, or output."
+
+                        # Show visual indicator that we're using previous work
+                        scratchpad_sections_count = sum(len(scratchpad_mgr.list_sections(pad))
+                                                       for pad in ["output", "research", "outline", "format", "tables", "data"])
+                        st.info(f"💡 Using previous work from Multi-Agent Team ({scratchpad_sections_count} sections available across all scratchpads)")
 
                 # Use selected model for General Assistant
                 selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
