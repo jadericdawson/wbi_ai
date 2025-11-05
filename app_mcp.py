@@ -9801,8 +9801,8 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
         # Clear the incomplete flag
         st.session_state.workflow_incomplete = False
 
-    # Use GPT-4.1 for multi-agent workflow (50 req/min vs o3-mini's 1 req/min)
-    o3_client = st.session_state.gpt41_client
+    # Assume o3_client is a pre-initialized AzureOpenAI instance for chat completions
+    o3_client = st.session_state.o3_client
 
     if continuing_work:
         # Show continuation message
@@ -10111,7 +10111,7 @@ def run_agentic_workflow(user_prompt: str, log_placeholder, final_answer_placeho
 Use scratchpad_read() to access full content from OUTPUT, RESEARCH, and other pads."""}
                 ]
                 response = o3_client.chat.completions.create(
-                    model=st.session_state.GPT41_DEPLOYMENT,
+                    model=st.session_state.O3_DEPLOYMENT,
                     messages=stop_messages
                 )
                 partial_answer = response.choices[0].message.content
@@ -10292,7 +10292,7 @@ Respond with JSON: {{"agent": "AgentName", "task": "specific task description"}}
                     logger.info(f"Orchestrator API call attempt {retry_attempt + 1}/{max_retries}")
                     response = make_api_call_with_context_recovery(
                         o3_client,
-                        st.session_state.GPT41_DEPLOYMENT,
+                        st.session_state.O3_DEPLOYMENT,
                         orchestrator_messages,
                         {"type": "json_object"},
                         call_type="orchestrator"
@@ -10597,7 +10597,7 @@ Use all the information above to compile the final answer."""}
                         try:
                             response = make_api_call_with_context_recovery(
                                 o3_client,
-                                st.session_state.GPT41_DEPLOYMENT,
+                                st.session_state.O3_DEPLOYMENT,
                                 finish_now_messages,
                                 {"type": "json_object"},
                                 call_type="finish"
@@ -10663,7 +10663,7 @@ Use all the information above to compile the final answer."""}
             if len(tasks_to_execute) > 1:
                 # Multiple tasks - run in parallel
                 # Get deployment name and context limits before spawning threads
-                o3_deployment = st.session_state.GPT41_DEPLOYMENT
+                o3_deployment = st.session_state.O3_DEPLOYMENT
                 context_limits = st.session_state.get("context_limit_chars", {
                     "research": 240000,  # ~60K tokens
                     "outline": 80000,    # ~20K tokens
@@ -10795,7 +10795,7 @@ You have access to all scratchpad tools for reading and writing."""
                             try:
                                 response = make_api_call_with_context_recovery(
                                     o3_client,
-                                    st.session_state.GPT41_DEPLOYMENT,
+                                    st.session_state.O3_DEPLOYMENT,
                                     agent_messages,
                                     {"type": "json_object"},
                                     call_type="agent"
@@ -10864,7 +10864,7 @@ You have access to all scratchpad tools for reading and writing."""
                                     try:
                                         response = make_api_call_with_context_recovery(
                                             o3_client,
-                                            st.session_state.GPT41_DEPLOYMENT,
+                                            st.session_state.O3_DEPLOYMENT,
                                             query_agent_messages,
                                             {"type": "json_object"},
                                             call_type="tool_agent"
