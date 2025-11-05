@@ -40,6 +40,7 @@ scratchpad.db
 
 # Environment variables and secrets
 .env
+azure_app_settings.json
 
 IDE / Editor specific
 .idea/
