@@ -1187,7 +1187,8 @@ if IS_LOCAL:
                 st.session_state.gpt41_client = AzureOpenAI(
                     azure_endpoint=st.session_state.GPT41_ENDPOINT,
                     api_key=st.session_state.GPT41_API_KEY,
-                    api_version="2024-05-01-preview"
+                    api_version="2024-05-01-preview",
+                    max_retries=0  # Disable SDK retry logic
                 )
             gpt41_client = st.session_state.gpt41_client
             st.info(f"Verifying deployment '{st.session_state.GPT41_DEPLOYMENT}'...")
@@ -1212,7 +1213,8 @@ if IS_LOCAL:
                 st.session_state.o3_client = AzureOpenAI(
                     azure_endpoint=st.session_state.GPT41_ENDPOINT,
                     azure_ad_token_provider=token_provider,
-                    api_version="2024-12-01-preview"
+                    api_version="2024-12-01-preview",
+                    max_retries=0  # Disable SDK retry logic
                 )
             o3_client = st.session_state.o3_client
             st.info(f"Verifying deployment '{st.session_state.O3_DEPLOYMENT}'...")
@@ -1273,7 +1275,8 @@ def get_gpt41_client():
     return AzureOpenAI(
         azure_endpoint=endpoint,
         api_key=key,
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview")
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-05-01-preview"),
+        max_retries=0  # Disable SDK retry logic, use our custom retry with faster backoff
     )
 
 @st.cache_resource
@@ -1290,7 +1293,8 @@ def get_o3_client():
     return AzureOpenAI(
         azure_endpoint=endpoint,
         azure_ad_token_provider=token_provider,
-        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+        max_retries=0  # Disable SDK retry logic, use our custom retry with faster backoff
     )
 
 @st.cache_resource
@@ -10392,24 +10396,54 @@ Respond with JSON: {{"agent": "AgentName", "task": "specific task description"}}
         # Check if decision is an array (parallel tasks) or single object
         if isinstance(decision_json, list):
             # Multiple parallel tasks in array format
-            tasks_to_execute = decision_json
-            scratchpad += f"\n**Loop {loop_num}:**\n- **Thought:** The orchestrator decided to execute **{len(tasks_to_execute)} parallel tasks**:\n"
-            for idx, task_obj in enumerate(tasks_to_execute, 1):
-                agent_name = task_obj.get("agent", "Unknown")
-                task_desc = task_obj.get("task", "")[:80]
-                scratchpad += f"  {idx}. **{agent_name}**: {task_desc}...\n"
+            tasks_to_execute = []
+            for task_item in decision_json:
+                # Validate each task is a dict
+                if isinstance(task_item, dict):
+                    tasks_to_execute.append(task_item)
+                else:
+                    logger.warning(f"Invalid task item in array (not a dict): {task_item}")
+
+            if tasks_to_execute:
+                scratchpad += f"\n**Loop {loop_num}:**\n- **Thought:** The orchestrator decided to execute **{len(tasks_to_execute)} parallel tasks**:\n"
+                for idx, task_obj in enumerate(tasks_to_execute, 1):
+                    agent_name = task_obj.get("agent", "Unknown")
+                    task_desc = task_obj.get("task", "")[:80]
+                    scratchpad += f"  {idx}. **{agent_name}**: {task_desc}...\n"
+            else:
+                logger.error(f"Orchestrator returned list but no valid task dicts found: {decision_json}")
+                # Fallback to single task
+                tasks_to_execute = [{"agent": "Research Agent", "task": "Research the user's question"}]
         elif isinstance(decision_json, dict) and "tasks" in decision_json:
             # Multiple parallel tasks in wrapped format: {"agent": "parallel", "tasks": [...]}
-            tasks_to_execute = decision_json.get("tasks", [])
-            scratchpad += f"\n**Loop {loop_num}:**\n- **Thought:** The orchestrator decided to execute **{len(tasks_to_execute)} parallel tasks**:\n"
-            for idx, task_obj in enumerate(tasks_to_execute, 1):
-                agent_name = task_obj.get("agent", "Unknown")
-                task_desc = task_obj.get("task", "")[:80]
-                scratchpad += f"  {idx}. **{agent_name}**: {task_desc}...\n"
+            raw_tasks = decision_json.get("tasks", [])
+            tasks_to_execute = []
+            for task_item in raw_tasks:
+                # Validate each task is a dict
+                if isinstance(task_item, dict):
+                    tasks_to_execute.append(task_item)
+                else:
+                    logger.warning(f"Invalid task item in tasks array (not a dict): {task_item}")
+
+            if tasks_to_execute:
+                scratchpad += f"\n**Loop {loop_num}:**\n- **Thought:** The orchestrator decided to execute **{len(tasks_to_execute)} parallel tasks**:\n"
+                for idx, task_obj in enumerate(tasks_to_execute, 1):
+                    agent_name = task_obj.get("agent", "Unknown")
+                    task_desc = task_obj.get("task", "")[:80]
+                    scratchpad += f"  {idx}. **{agent_name}**: {task_desc}...\n"
+            else:
+                logger.error(f"Orchestrator returned dict with tasks but no valid task dicts found: {decision_json}")
+                # Fallback to single task
+                tasks_to_execute = [{"agent": "Research Agent", "task": "Research the user's question"}]
         else:
-            # Single task
-            next_agent = decision_json.get("agent")
-            task = decision_json.get("task")
+            # Single task - validate it's a dict
+            if not isinstance(decision_json, dict):
+                logger.error(f"Orchestrator returned invalid format (not dict, list, or dict with tasks): {type(decision_json).__name__}")
+                # Fallback
+                tasks_to_execute = [{"agent": "Research Agent", "task": "Research the user's question"}]
+            else:
+                next_agent = decision_json.get("agent")
+                task = decision_json.get("task")
 
             # *** Check for loop termination conditions ***
             if next_agent == "FINISH" and task:
