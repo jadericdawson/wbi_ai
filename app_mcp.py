@@ -8304,6 +8304,32 @@ AGENT_PERSONAS = {
     - ✅ Identified and filled information gaps through refinement
 
     ═══════════════════════════════════════════════════════════════
+    ⚠️  COSMOS DB SEARCH LIMITATIONS & ERROR HANDLING ⚠️
+    ═══════════════════════════════════════════════════════════════
+
+    **IMPORTANT: Cosmos DB has strict limits on search strings:**
+
+    1. **semantic_query_text MUST be SHORT** (< 50 characters recommended)
+       - ❌ BAD: "Jaderic Dawson's skills, certifications, publications, and speaking engagements"
+       - ✅ GOOD: "Jaderic Dawson skills certifications"
+       - ✅ GOOD: "career achievements"
+
+    2. **If you see "Bad Request" errors:**
+       - Your semantic_query_text was TOO LONG
+       - Simplify to 2-4 keywords
+       - Use keywords array for additional terms
+
+    3. **Error Recovery Strategy:**
+       - See error? Immediately retry with SHORTER semantic_query_text
+       - Break long queries into multiple short searches
+       - Example: Instead of one long query, do 3 short queries
+
+    4. **Best Practices:**
+       - keywords: ["term1", "term2", "term3"] - For comprehensive coverage
+       - semantic_query_text: "short phrase" - For context/ranking
+       - If error persists: Use keywords ONLY, set semantic_query_text to ""
+
+    ═══════════════════════════════════════════════════════════════
     ⚠️  CRITICAL: JSON FORMAT REQUIREMENTS ⚠️
     ═══════════════════════════════════════════════════════════════
 
@@ -9444,7 +9470,17 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 # ========================================
                 # Search for exact semantic query text if provided
                 if semantic_query_text and len(semantic_query_text.strip()) > 3:
-                    safe_semantic = semantic_query_text.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
+                    # IMPORTANT: Cosmos DB CONTAINS() has a ~100 character limit on search strings
+                    # If semantic query is too long, extract key terms instead
+                    if len(semantic_query_text) > 80:
+                        # Extract key terms (words > 3 chars, limit to first 3)
+                        key_terms = [word for word in semantic_query_text.split() if len(word) > 3][:3]
+                        safe_semantic = " ".join(key_terms)
+                        logger.info(f"📝 Truncated long semantic query to key terms: '{safe_semantic}'")
+                    else:
+                        safe_semantic = semantic_query_text
+
+                    safe_semantic = safe_semantic.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
 
                     # Build search clauses with IS_DEFINED checks for optional fields
                     phrase_field_clauses = []
@@ -9465,16 +9501,27 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                     try:
                         logger.info(f"🔍 Executing phrase query: {phrase_query}")
                         phrase_results = uploader.execute_query(phrase_query)
-                        for r in phrase_results:
-                            if isinstance(r, dict) and "id" in r:
-                                r["_source_container"] = kb_path
-                                r["_search_score"] = 100  # Highest score for exact phrase matches
-                                r["_match_strategy"] = "exact_phrase"
-                                kb_results_by_id[r["id"]] = r
-                        if len(phrase_results) > 0:
-                            query_strategies.append(f"exact_phrase({len(phrase_results)} matches)")
+
+                        # Check if results contain error dict
+                        if phrase_results and len(phrase_results) > 0 and isinstance(phrase_results[0], dict) and "error" in phrase_results[0]:
+                            error_detail = phrase_results[0].get("error", "Unknown error")
+                            if "Bad Request" in str(error_detail) or "400" in str(error_detail):
+                                errors.append(f"❌ COSMOS DB ERROR: Your semantic_query_text is TOO LONG ('{safe_semantic[:50]}...'). Retry with keywords ONLY or shorter semantic query (< 50 chars).")
+                                logger.error(f"❌ Cosmos DB query failed - semantic query too long")
+                            else:
+                                errors.append(f"Query error: {error_detail}")
+                        else:
+                            for r in phrase_results:
+                                if isinstance(r, dict) and "id" in r:
+                                    r["_source_container"] = kb_path
+                                    r["_search_score"] = 100  # Highest score for exact phrase matches
+                                    r["_match_strategy"] = "exact_phrase"
+                                    kb_results_by_id[r["id"]] = r
+                            if len(phrase_results) > 0:
+                                query_strategies.append(f"exact_phrase({len(phrase_results)} matches)")
                     except Exception as e:
                         logger.warning(f"Exact phrase search failed for {kb_path}: {e}")
+                        errors.append(f"Search exception: {str(e)}")
 
                 # ========================================
                 # STRATEGY 2: KEYWORD OR SEARCH (Broad Recall)
@@ -9505,20 +9552,27 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 try:
                     logger.info(f"🔍 Executing keyword query: {keyword_query}")
                     keyword_results = uploader.execute_query(keyword_query)
-                    for r in keyword_results:
-                        if isinstance(r, dict) and "id" in r:
-                            r["_source_container"] = kb_path
-                            # Only add if not already found by exact phrase search
-                            if r["id"] not in kb_results_by_id:
-                                r["_search_score"] = 50  # Medium score for keyword matches
-                                r["_match_strategy"] = "keyword_or"
-                                kb_results_by_id[r["id"]] = r
-                            else:
-                                # Boost score if matched by multiple strategies
-                                kb_results_by_id[r["id"]]["_search_score"] += 25
-                                kb_results_by_id[r["id"]]["_match_strategy"] += ",keyword_or"
-                    if len(keyword_results) > 0:
-                        query_strategies.append(f"keyword_or({len(keyword_results)} matches)")
+
+                    # Check if results contain error dict
+                    if keyword_results and len(keyword_results) > 0 and isinstance(keyword_results[0], dict) and "error" in keyword_results[0]:
+                        error_detail = keyword_results[0].get("error", "Unknown error")
+                        errors.append(f"Keyword query error: {error_detail}")
+                        logger.error(f"❌ Keyword search query failed")
+                    else:
+                        for r in keyword_results:
+                            if isinstance(r, dict) and "id" in r:
+                                r["_source_container"] = kb_path
+                                # Only add if not already found by exact phrase search
+                                if r["id"] not in kb_results_by_id:
+                                    r["_search_score"] = 50  # Medium score for keyword matches
+                                    r["_match_strategy"] = "keyword_or"
+                                    kb_results_by_id[r["id"]] = r
+                                else:
+                                    # Boost score if matched by multiple strategies
+                                    kb_results_by_id[r["id"]]["_search_score"] += 25
+                                    kb_results_by_id[r["id"]]["_match_strategy"] += ",keyword_or"
+                        if len(keyword_results) > 0:
+                            query_strategies.append(f"keyword_or({len(keyword_results)} matches)")
                 except Exception as e:
                     error_msg = f"Keyword search failed for {kb_path}: {str(e)}"
                     errors.append(error_msg)
