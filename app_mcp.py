@@ -1155,6 +1155,16 @@ if "credentials_loaded" not in st.session_state:
     st.session_state.SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
     st.session_state.SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION")
 
+    # Rate Limit Configuration (optional - can be overridden per deployment)
+    # Set this if you have higher quota than defaults
+    # Example: 5000 for Enterprise tier, 1000 for Standard tier
+    rate_limit_rpm_env = os.getenv("RATE_LIMIT_RPM")
+    if rate_limit_rpm_env:
+        st.session_state.rate_limit_rpm = int(rate_limit_rpm_env)
+        logger.info(f"📊 Custom RPM limit configured: {st.session_state.rate_limit_rpm}")
+    else:
+        st.session_state.rate_limit_rpm = None  # Use defaults
+
     st.session_state.credentials_loaded = True
 
 # --- Check for Missing Env Vars ---
@@ -9624,6 +9634,72 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         return f"ToolExecutionError: An unexpected error occurred during tool execution: {e}"
 
 
+def calculate_rate_limit_delay(num_parallel_calls: int, model_name: str) -> float:
+    """
+    Calculate the optimal delay between parallel API calls to prevent rate limit errors.
+
+    Based on Azure OpenAI rate limits (RPM - Requests Per Minute):
+    - GPT-4.1: Default 1K RPM, Enterprise 5K RPM
+    - DeepSeek-R1: Default 1K RPM
+    - Formula: delay = (60 seconds / RPM) * safety_factor
+
+    Args:
+        num_parallel_calls: Number of parallel agent tasks
+        model_name: Model deployment name (for identifying model type)
+
+    Returns:
+        Recommended delay in seconds between parallel calls
+    """
+    # Define conservative RPM limits (can be overridden in session state)
+    default_rpm_limits = {
+        "gpt-4.1": 800,  # Conservative: 80% of 1K RPM default
+        "gpt-4": 800,
+        "gpt-4o": 2000,  # 80% of 2.5K RPM
+        "gpt-35-turbo": 2000,
+        "deepseek": 800,  # Conservative: 80% of 1K RPM
+        "default": 800  # Safe fallback
+    }
+
+    # Check for user-configured RPM limit
+    configured_rpm = st.session_state.get("rate_limit_rpm", None)
+    if configured_rpm:
+        rpm_limit = configured_rpm
+        logger.info(f"📊 Using configured RPM limit: {rpm_limit}")
+    else:
+        # Detect model type from deployment name
+        model_lower = model_name.lower()
+        rpm_limit = default_rpm_limits.get("default", 800)
+
+        for model_key, limit in default_rpm_limits.items():
+            if model_key in model_lower:
+                rpm_limit = limit
+                break
+
+        logger.info(f"📊 Using default RPM limit for {model_name}: {rpm_limit}")
+
+    # Calculate minimum delay between requests to stay under RPM
+    # seconds_per_request = 60 / RPM
+    seconds_per_request = 60.0 / rpm_limit
+
+    # For parallel calls, we need to space them out
+    # If we have N parallel calls, stagger them across the time window
+    if num_parallel_calls <= 1:
+        return 0.5  # Minimum delay for single call
+
+    # Calculate delay: spread N calls across the time window
+    # Add 20% safety margin
+    delay = seconds_per_request * 1.2
+
+    # Ensure minimum delay of 0.1s (don't go too fast)
+    delay = max(0.1, delay)
+
+    # Ensure maximum delay of 2s (don't wait too long)
+    delay = min(2.0, delay)
+
+    logger.info(f"⏱️  Calculated delay for {num_parallel_calls} parallel calls: {delay:.2f}s (RPM limit: {rpm_limit})")
+    return delay
+
+
 def make_api_call_with_context_recovery(client, model, messages, response_format, call_type="orchestrator", progress_container=None):
     """
     Make an API call with automatic context length recovery and rate limit handling.
@@ -10877,11 +10953,14 @@ Use all the information above to compile the final answer."""}
                     "display": 320000    # ~80K tokens
                 })  # Updated for GPT-4.1's 1M token context
 
-                with st.spinner(f"⚡ Executing {len(tasks_to_execute)} tasks in parallel..."):
+                # Calculate optimal delay between parallel calls based on rate limits
+                optimal_delay = calculate_rate_limit_delay(len(tasks_to_execute), o3_deployment)
+
+                with st.spinner(f"⚡ Executing {len(tasks_to_execute)} tasks in parallel (staggered by {optimal_delay:.2f}s to prevent rate limits)..."):
                     with ThreadPoolExecutor(max_workers=len(tasks_to_execute)) as executor:
                         # Submit all tasks with staggered delays to prevent rate limit bursts
                         future_to_task = {}
-                        for task_obj in tasks_to_execute:
+                        for idx, task_obj in enumerate(tasks_to_execute):
                             agent_name = task_obj.get("agent")
                             task_desc = task_obj.get("task")
                             future = executor.submit(
@@ -10896,9 +10975,12 @@ Use all the information above to compile the final answer."""}
                                 query_expander  # Pass query_expander for progress bar display
                             )
                             future_to_task[future] = task_obj
-                            # PREVENTIVE stagger: Prevents all parallel agents from hitting API simultaneously
+
+                            # PREVENTIVE stagger: Calculated delay based on RPM limits
+                            # This prevents all parallel agents from hitting API simultaneously
                             # Note: This is preventive, not recovery. Rate limit recovery uses Azure's exact retry time.
-                            time.sleep(0.25)
+                            if idx < len(tasks_to_execute) - 1:  # Don't delay after last task
+                                time.sleep(optimal_delay)
 
                         # Collect results as they complete
                         for future in as_completed(future_to_task):
