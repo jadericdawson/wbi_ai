@@ -1149,6 +1149,7 @@ if "credentials_loaded" not in st.session_state:
     # O3 for Chat Synthesis & Multi-Agent Orchestration
     # Context: 200k tokens input, 100k tokens output
     st.session_state.O3_DEPLOYMENT = os.getenv("O3_DEPLOYMENT_NAME")
+    logger.info(f"✅ LOADED O3_DEPLOYMENT: {st.session_state.O3_DEPLOYMENT}")
 
     # Speech-to-Text Credentials
     st.session_state.SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY")
