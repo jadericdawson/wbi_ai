@@ -10671,7 +10671,7 @@ Use all the information above to compile the final answer."""}
 
                 with st.spinner(f"⚡ Executing {len(tasks_to_execute)} tasks in parallel..."):
                     with ThreadPoolExecutor(max_workers=len(tasks_to_execute)) as executor:
-                        # Submit all tasks
+                        # Submit all tasks with staggered delays to prevent rate limit bursts
                         future_to_task = {}
                         for task_obj in tasks_to_execute:
                             agent_name = task_obj.get("agent")
@@ -10687,6 +10687,8 @@ Use all the information above to compile the final answer."""}
                                 display_scratchpad
                             )
                             future_to_task[future] = task_obj
+                            # Stagger API calls by 0.25s to avoid hitting rate limits
+                            time.sleep(0.25)
 
                         # Collect results as they complete
                         for future in as_completed(future_to_task):
