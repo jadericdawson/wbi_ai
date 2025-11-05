@@ -14400,17 +14400,18 @@ Your next prompt will resume with all this context intact.""")
                 st.session_state.session_rag_context = ""
                 st.session_state.rag_file_status = None
 
-                # Workflow completed successfully - clear all flags and rerun to hide stop button
+                # Workflow completed successfully - clear flags but DON'T rerun
+                # Let the user see the final answer and interact with it
                 st.session_state.is_generating = False
                 st.session_state.workflow_ready_to_start = False
-                # Rerun to refresh UI and hide stop button
-                st.rerun()
+                # Note: Removed st.rerun() to allow user to see final answer
             except Exception as e:
                 st.error(f"An error occurred in the agentic workflow: {e}")
-                # On error, clear flags and rerun to hide stop button
+                logger.error(f"Agentic workflow error: {e}", exc_info=True)
+                # On error, clear flags but show error to user
                 st.session_state.is_generating = False
                 st.session_state.workflow_ready_to_start = False
-                st.rerun()
+                # Note: Removed st.rerun() to allow user to see the error
             # Removed st.stop() - let chat input render at bottom
 
         # 2) Fact correction (all personas)
