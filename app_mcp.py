@@ -13125,7 +13125,28 @@ Your next prompt will resume with all this context intact.""")
             }
             # Note: max_tokens not set here to allow longer synthesis responses
 
-            stream = client.chat.completions.create(**create_params)
+            # Retry logic for rate limiting (429 errors)
+            max_retries = 3
+            base_delay = 2
+            stream = None
+
+            for attempt in range(max_retries):
+                try:
+                    stream = client.chat.completions.create(**create_params)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    error_str = str(e)
+                    if "429" in error_str or "rate limit" in error_str.lower():
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt)
+                            logger.warning(f"Rate limit hit during synthesis. Retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                            time.sleep(delay)
+                        else:
+                            logger.error(f"Rate limit exceeded after {max_retries} attempts during synthesis")
+                            raise
+                    else:
+                        # Non-rate-limit error, raise immediately
+                        raise
             parts = []
             reasoning_parts = []
 
