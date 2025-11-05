@@ -8284,6 +8284,60 @@ AGENT_PERSONAS = {
     - ✅ Extracted findings to well-organized RESEARCH sections
     - ✅ Identified and filled information gaps through refinement
 
+    ═══════════════════════════════════════════════════════════════
+    ⚠️  CRITICAL: JSON FORMAT REQUIREMENTS ⚠️
+    ═══════════════════════════════════════════════════════════════
+
+    **YOU MUST RESPOND WITH VALID JSON ONLY - NO PROSE BEFORE OR AFTER**
+
+    Your response MUST be one of these EXACT formats:
+
+    **Format 1 - Single tool call:**
+    {{
+      "tool_use": {{
+        "name": "search_knowledge_base",
+        "params": {{
+          "keywords": ["term1", "term2"],
+          "semantic_query_text": "your query here",
+          "rank_limit": 15
+        }}
+      }}
+    }}
+
+    **Format 2 - Multiple parallel tool calls:**
+    {{
+      "tool_use": [
+        {{
+          "name": "search_knowledge_base",
+          "params": {{
+            "keywords": ["term1", "term2"],
+            "semantic_query_text": "query 1",
+            "rank_limit": 15
+          }}
+        }},
+        {{
+          "name": "search_knowledge_base",
+          "params": {{
+            "keywords": ["term3", "term4"],
+            "semantic_query_text": "query 2",
+            "rank_limit": 15
+          }}
+        }}
+      ]
+    }}
+
+    **Format 3 - Text response (when explaining or finished):**
+    {{
+      "response": "Your message here explaining what you found or what you need"
+    }}
+
+    **IMPORTANT JSON RULES:**
+    - NO trailing commas after last array element
+    - ALL strings MUST use double quotes (not single quotes)
+    - NO comments in JSON
+    - NO extra text before {{ or after }}
+    - Ensure all brackets and braces are properly matched
+
     {TOOL_DEFINITIONS}""",
 
         "Query Refiner": """You are an expert query refinement specialist. Your job is to analyze search results and create more targeted, refined queries. You MUST respond in JSON format.
@@ -9375,6 +9429,7 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                     )
 
                     try:
+                        logger.info(f"🔍 Executing phrase query: {phrase_query}")
                         phrase_results = uploader.execute_query(phrase_query)
                         for r in phrase_results:
                             if isinstance(r, dict) and "id" in r:
@@ -9407,6 +9462,7 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 )
 
                 try:
+                    logger.info(f"🔍 Executing keyword query: {keyword_query}")
                     keyword_results = uploader.execute_query(keyword_query)
                     for r in keyword_results:
                         if isinstance(r, dict) and "id" in r:
@@ -9455,6 +9511,7 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                         )
 
                         try:
+                            logger.info(f"🔍 Executing semantic query: {semantic_query}")
                             semantic_results = uploader.execute_query(semantic_query)
                             for r in semantic_results:
                                 if isinstance(r, dict) and "id" in r:
@@ -9686,7 +9743,46 @@ You have access to all scratchpad tools for reading and writing."""
                     {"type": "json_object"},
                     call_type="agent"
                 )
-                agent_output = json.loads(response.choices[0].message.content)
+
+                # Parse JSON with fallback repair
+                raw_content = response.choices[0].message.content
+
+                # Handle empty or whitespace-only responses
+                if not raw_content or not raw_content.strip():
+                    logger.error(f"{agent_name} returned empty response")
+                    agent_output = {
+                        "response": f"Agent returned an empty response. This may indicate the model is overloaded or had an error. Please try again."
+                    }
+                else:
+                    try:
+                        agent_output = json.loads(raw_content)
+                    except json.JSONDecodeError as json_err:
+                        # JSON parsing failed - attempt to repair
+                        logger.warning(f"{agent_name} returned malformed JSON: {json_err}. Attempting repair...")
+                        logger.debug(f"Raw content (first 200 chars): {raw_content[:200]}")
+
+                        # Try to extract JSON from wrapped prose
+                        try:
+                            # Strip whitespace and newlines first
+                            cleaned_content = raw_content.strip()
+
+                            # Find first { and last }
+                            start = cleaned_content.find("{")
+                            end = cleaned_content.rfind("}")
+                            if start != -1 and end != -1 and end > start:
+                                extracted_json = cleaned_content[start:end+1]
+                                agent_output = json.loads(extracted_json)
+                                logger.info(f"Successfully extracted JSON from {agent_name} response")
+                            else:
+                                raise ValueError("No JSON braces found")
+                        except Exception as extract_err:
+                            # Still failed - return error response
+                            error_msg = f"JSON parse error at line {json_err.lineno} col {json_err.colno}: {json_err.msg}"
+                            logger.error(f"{agent_name} JSON repair failed: {error_msg}")
+                            agent_output = {
+                                "response": f"Agent returned malformed JSON that could not be repaired. Error: {error_msg}. Raw response (first 500 chars): {raw_content[:500]}"
+                            }
+
                 # Ensure agent_output is a dict, not a list
                 if not isinstance(agent_output, dict):
                     agent_output = {
@@ -10593,12 +10689,13 @@ Use all the information above to compile the final answer."""}
                     ]
 
                     # Try API call with context recovery
+                    # Use GPT-4.1 for final answer generation (better JSON handling)
                     max_retries = 2
                     for retry_attempt in range(max_retries):
                         try:
                             response = make_api_call_with_context_recovery(
                                 o3_client,
-                                st.session_state.O3_DEPLOYMENT,
+                                st.session_state.GPT41_DEPLOYMENT,
                                 finish_now_messages,
                                 {"type": "json_object"},
                                 call_type="finish"
@@ -10664,15 +10761,17 @@ Use all the information above to compile the final answer."""}
             if len(tasks_to_execute) > 1:
                 # Multiple tasks - run in parallel
                 # Get deployment name and context limits before spawning threads
-                o3_deployment = st.session_state.O3_DEPLOYMENT
+                # Use GPT-4.1 for agent tasks (better JSON handling than DeepSeek-R1)
+                o3_deployment = st.session_state.GPT41_DEPLOYMENT
+                logger.info(f"🤖 Using {o3_deployment} for agent tasks (better JSON/tool calling)")
                 context_limits = st.session_state.get("context_limit_chars", {
-                    "research": 240000,  # ~60K tokens
-                    "outline": 80000,    # ~20K tokens
-                    "output": 240000,    # ~60K tokens
-                    "data": 160000,      # ~40K tokens
-                    "log": 80000,        # ~20K tokens
-                    "display": 160000    # ~40K tokens
-                })  # Updated for O3's 200k token context
+                    "research": 400000,  # ~100K tokens (GPT-4.1 has 1M context)
+                    "outline": 160000,    # ~40K tokens
+                    "output": 400000,    # ~100K tokens
+                    "data": 320000,      # ~80K tokens
+                    "log": 160000,        # ~40K tokens
+                    "display": 320000    # ~80K tokens
+                })  # Updated for GPT-4.1's 1M token context
 
                 with st.spinner(f"⚡ Executing {len(tasks_to_execute)} tasks in parallel..."):
                     with ThreadPoolExecutor(max_workers=len(tasks_to_execute)) as executor:
@@ -10791,17 +10890,57 @@ You have access to all scratchpad tools for reading and writing."""
                         ]
 
                         # Try API call with context recovery
+                        # Use GPT-4.1 for agent tasks (better JSON handling than DeepSeek-R1)
                         max_retries = 2
                         for retry_attempt in range(max_retries):
                             try:
                                 response = make_api_call_with_context_recovery(
                                     o3_client,
-                                    st.session_state.O3_DEPLOYMENT,
+                                    st.session_state.GPT41_DEPLOYMENT,
                                     agent_messages,
                                     {"type": "json_object"},
                                     call_type="agent"
                                 )
-                                agent_output = json.loads(response.choices[0].message.content)
+
+                                # Parse JSON with fallback repair
+                                raw_content = response.choices[0].message.content
+
+                                # Handle empty or whitespace-only responses
+                                if not raw_content or not raw_content.strip():
+                                    logger.error(f"{next_agent} returned empty response")
+                                    agent_output = {
+                                        "response": f"Agent returned an empty response. This may indicate the model is overloaded or had an error. Please try again."
+                                    }
+                                else:
+                                    try:
+                                        agent_output = json.loads(raw_content)
+                                    except json.JSONDecodeError as json_err:
+                                        # JSON parsing failed - attempt to repair
+                                        logger.warning(f"{next_agent} returned malformed JSON: {json_err}. Attempting repair...")
+                                        logger.debug(f"Raw content (first 200 chars): {raw_content[:200]}")
+
+                                        # Try to extract JSON from wrapped prose
+                                        try:
+                                            # Strip whitespace and newlines first
+                                            cleaned_content = raw_content.strip()
+
+                                            # Find first { and last }
+                                            start = cleaned_content.find("{")
+                                            end = cleaned_content.rfind("}")
+                                            if start != -1 and end != -1 and end > start:
+                                                extracted_json = cleaned_content[start:end+1]
+                                                agent_output = json.loads(extracted_json)
+                                                logger.info(f"Successfully extracted JSON from {next_agent} response")
+                                            else:
+                                                raise ValueError("No JSON braces found")
+                                        except Exception as extract_err:
+                                            # Still failed - return error response
+                                            error_msg = f"JSON parse error at line {json_err.lineno} col {json_err.colno}: {json_err.msg}"
+                                            logger.error(f"{next_agent} JSON repair failed: {error_msg}")
+                                            agent_output = {
+                                                "response": f"Agent returned malformed JSON that could not be repaired. Error: {error_msg}. Raw response (first 500 chars): {raw_content[:500]}"
+                                            }
+
                                 # Ensure agent_output is a dict, not a list
                                 if not isinstance(agent_output, dict):
                                     agent_output = {
@@ -10860,12 +10999,13 @@ You have access to all scratchpad tools for reading and writing."""
                                 query_agent_messages = [{"role": "system", "content": AGENT_PERSONAS["Tool Agent"]}, {"role": "user", "content": sub_task}]
 
                                 # Try API call with context recovery
+                                # Use GPT-4.1 for Tool Agent (better JSON handling)
                                 max_retries = 2
                                 for retry_attempt in range(max_retries):
                                     try:
                                         response = make_api_call_with_context_recovery(
                                             o3_client,
-                                            st.session_state.O3_DEPLOYMENT,
+                                            st.session_state.GPT41_DEPLOYMENT,
                                             query_agent_messages,
                                             {"type": "json_object"},
                                             call_type="tool_agent"
