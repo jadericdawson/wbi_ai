@@ -10062,8 +10062,21 @@ You have access to all scratchpad tools."""
             result["observation"] = agent_output["response"]
 
     except Exception as e:
-        result["error"] = str(e)
-        result["observation"] = f"Error executing {agent_name}: {str(e)}"
+        # Capture full exception details with traceback
+        import traceback
+        error_traceback = traceback.format_exc()
+        error_message = str(e) if str(e) else f"{type(e).__name__} (no message)"
+
+        # Log full details for debugging
+        logger.error(f"❌ Error executing {agent_name}:")
+        logger.error(f"   Task: {task[:200]}")
+        logger.error(f"   Exception type: {type(e).__name__}")
+        logger.error(f"   Exception message: {error_message}")
+        logger.error(f"   Full traceback:\n{error_traceback}")
+
+        # Set error fields (use "ERROR" if message is empty to ensure truthy value)
+        result["error"] = error_message if error_message else "ERROR"
+        result["observation"] = f"Error executing {agent_name}: {error_message}\n\nTraceback (last 500 chars):\n{error_traceback[-500:]}"
 
     return result
 
@@ -11046,6 +11059,9 @@ Use all the information above to compile the final answer."""}
                                 agent_name = result["agent"]
                                 if result["error"]:
                                     scratchpad += f"  - ❌ **{agent_name}**: Error - {result['error'][:500]}\n"
+                                    # Also show observation which contains traceback
+                                    if result.get("observation") and "Traceback" in result["observation"]:
+                                        scratchpad += f"    - **Details**: {result['observation'][:1000]}\n"
                                 elif result["tool_call"]:
                                     tool_name = result["tool_call"][0]
                                     tool_params = result["tool_call"][1]
