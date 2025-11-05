@@ -2028,11 +2028,20 @@ class CosmosUploader:
                     item['_source_container'] = f"{self.database.id}/{self.container.id}"
             return items
         except exceptions.CosmosHttpResponseError as e:
+            # Log the failed query for debugging
+            logger.error(f"❌ Cosmos DB query failed for {self.container.id}")
+            logger.error(f"   Reason: {e.reason}")
+            logger.error(f"   Status Code: {e.status_code}")
+            logger.error(f"   Failed Query (first 500 chars):\n{query_string[:500]}")
             st.warning(f"Cosmos DB query failed for {self.container.id}: {e.reason}")
-            return [{"error": str(e)}]
+            st.code(f"Failed query:\n{query_string[:300]}...", language="sql")
+            return [{"error": str(e), "query": query_string[:200]}]
         except Exception as e:
+            logger.error(f"❌ General query error for {self.container.id}: {str(e)}")
+            logger.error(f"   Failed Query (first 500 chars):\n{query_string[:500]}")
             st.error(f"General query error for {self.container.id}: {e}")
-            return [{"error": str(e)}]
+            st.code(f"Failed query:\n{query_string[:300]}...", language="sql")
+            return [{"error": str(e), "query": query_string[:200]}]
 
 @st.cache_resource
 def get_cosmos_uploader(database_name: str, container_name: str):
@@ -9372,14 +9381,21 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         if not keywords:
             return "ToolExecutionError: search_knowledge_base requires 'keywords' (list[str])."
 
-        # Fields we want to search across for all common containers
-        # (works for Documents chunks, VerifiedFacts, and ProjectSummaries)
-        search_fields = [
+        # Core fields that should exist in all containers
+        # Use IS_DEFINED checks for optional fields
+        core_search_fields = [
             "c.content",
+            "c.id"
+        ]
+
+        # Optional fields that may not exist in all containers
+        # These will use IS_DEFINED checks in WHERE clauses
+        optional_search_fields = [
             "c.metadata.original_filename",
-            "c.id",
             "c.question",
-            "c.answer"
+            "c.answer",
+            "c.summary",
+            "c.title"
         ]
 
         SINGLE_QUOTE = chr(39)
@@ -9419,11 +9435,19 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 # Search for exact semantic query text if provided
                 if semantic_query_text and len(semantic_query_text.strip()) > 3:
                     safe_semantic = semantic_query_text.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
-                    phrase_field_clauses = [f"CONTAINS({fld}, '{safe_semantic}', true)" for fld in search_fields]
+
+                    # Build search clauses with IS_DEFINED checks for optional fields
+                    phrase_field_clauses = []
+                    for fld in core_search_fields:
+                        phrase_field_clauses.append(f"CONTAINS({fld}, '{safe_semantic}', true)")
+                    for fld in optional_search_fields:
+                        phrase_field_clauses.append(f"(IS_DEFINED({fld}) AND CONTAINS({fld}, '{safe_semantic}', true))")
+
                     phrase_where = f"({' OR '.join(phrase_field_clauses)}) AND {exclusion_clause}"
 
+                    # Only SELECT fields that always exist
                     phrase_query = (
-                        f"SELECT TOP {rank_limit} c.id, c.content, c.metadata, c.question, c.answer "
+                        f"SELECT TOP {rank_limit} c.id, c.content, c.metadata "
                         f"FROM c "
                         f"WHERE {phrase_where}"
                     )
@@ -9449,14 +9473,21 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                 per_keyword_groups = []
                 for k in keywords:
                     safe_k = k.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
-                    field_clauses = [f"CONTAINS({fld}, '{safe_k}', true)" for fld in search_fields]
+
+                    # Build field clauses with IS_DEFINED checks for optional fields
+                    field_clauses = []
+                    for fld in core_search_fields:
+                        field_clauses.append(f"CONTAINS({fld}, '{safe_k}', true)")
+                    for fld in optional_search_fields:
+                        field_clauses.append(f"(IS_DEFINED({fld}) AND CONTAINS({fld}, '{safe_k}', true))")
+
                     per_keyword_groups.append("(" + " OR ".join(field_clauses) + ")")
 
                 keyword_clause = " OR ".join(per_keyword_groups)
                 keyword_where = f"({keyword_clause}) AND {exclusion_clause}"
 
                 keyword_query = (
-                    f"SELECT TOP {rank_limit * 2} c.id, c.content, c.metadata, c.question, c.answer "
+                    f"SELECT TOP {rank_limit * 2} c.id, c.content, c.metadata "
                     f"FROM c "
                     f"WHERE {keyword_where}"
                 )
@@ -9496,16 +9527,22 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
                         semantic_field_groups = []
                         for term in semantic_terms[:5]:  # Limit to first 5 terms to avoid query size issues
                             safe_term = term.replace(SINGLE_QUOTE, SINGLE_QUOTE * 2)
-                            # Prioritize content and question/answer fields
-                            priority_fields = ["c.content", "c.question", "c.answer"]
-                            field_clauses = [f"CONTAINS({fld}, '{safe_term}', true)" for fld in priority_fields]
+
+                            # Build field clauses with IS_DEFINED checks
+                            field_clauses = []
+                            # Core field - always search
+                            field_clauses.append(f"CONTAINS(c.content, '{safe_term}', true)")
+                            # Optional fields - check if defined
+                            for opt_field in ["c.question", "c.answer", "c.summary"]:
+                                field_clauses.append(f"(IS_DEFINED({opt_field}) AND CONTAINS({opt_field}, '{safe_term}', true))")
+
                             semantic_field_groups.append("(" + " OR ".join(field_clauses) + ")")
 
                         semantic_clause = " OR ".join(semantic_field_groups)
                         semantic_where = f"({semantic_clause}) AND {exclusion_clause}"
 
                         semantic_query = (
-                            f"SELECT TOP {rank_limit} c.id, c.content, c.metadata, c.question, c.answer "
+                            f"SELECT TOP {rank_limit} c.id, c.content, c.metadata "
                             f"FROM c "
                             f"WHERE {semantic_where}"
                         )
@@ -9587,7 +9624,7 @@ def execute_tool_call(tool_name: str, params: Dict[str, Any]) -> str:
         return f"ToolExecutionError: An unexpected error occurred during tool execution: {e}"
 
 
-def make_api_call_with_context_recovery(client, model, messages, response_format, call_type="orchestrator"):
+def make_api_call_with_context_recovery(client, model, messages, response_format, call_type="orchestrator", progress_container=None):
     """
     Make an API call with automatic context length recovery and rate limit handling.
 
@@ -9595,7 +9632,7 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
     to signal that the caller should rebuild messages and retry.
 
     If rate limit (429) is hit, parses the exact retry time from Azure's error message
-    and waits exactly that long (no arbitrary delays).
+    and waits exactly that long (no arbitrary delays). Shows a progress bar if container provided.
 
     Args:
         client: OpenAI client instance
@@ -9603,6 +9640,7 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
         messages: List of message dicts
         response_format: Response format dict
         call_type: Type of call for logging ("orchestrator", "agent", "finish")
+        progress_container: Optional Streamlit container to show progress bar during rate limit waits
 
     Returns:
         API response object
@@ -9664,7 +9702,36 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
                     retry_delay_with_buffer = retry_delay + 0.5
 
                     logger.warning(f"🔄 Rate limit hit for {call_type} call. Waiting exactly {retry_delay} seconds (+0.5s buffer) as requested by Azure... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay_with_buffer)
+
+                    # Show progress bar if container provided
+                    if progress_container:
+                        with progress_container:
+                            progress_bar = st.progress(0.0)
+                            status_text = st.empty()
+
+                            # Countdown with progress bar
+                            start_time = time.time()
+                            while True:
+                                elapsed = time.time() - start_time
+                                remaining = max(0, retry_delay_with_buffer - elapsed)
+
+                                if remaining <= 0:
+                                    break
+
+                                # Update progress (inverted - starts at 0%, goes to 100%)
+                                progress = min(1.0, elapsed / retry_delay_with_buffer)
+                                progress_bar.progress(progress)
+                                status_text.text(f"⏳ Rate limit: Waiting {remaining:.1f}s (Azure requested {retry_delay}s)")
+
+                                time.sleep(0.1)  # Update every 100ms
+
+                            # Clear progress bar when done
+                            progress_bar.empty()
+                            status_text.empty()
+                    else:
+                        # No progress container - just sleep
+                        time.sleep(retry_delay_with_buffer)
+
                     continue
                 else:
                     # Max retries reached, raise the error
@@ -9700,7 +9767,7 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
 
 
 # Helper function for executing a single agent task
-def execute_single_agent_task(agent_name: str, task: str, scratchpad_mgr, o3_client, o3_deployment: str, context_limit_chars: dict, display_scratchpad: str = "") -> Dict:
+def execute_single_agent_task(agent_name: str, task: str, scratchpad_mgr, o3_client, o3_deployment: str, context_limit_chars: dict, display_scratchpad: str = "", progress_container=None) -> Dict:
     """
     Execute a single agent task and return the result.
 
@@ -9776,7 +9843,8 @@ You have access to all scratchpad tools for reading and writing."""
                     o3_deployment,
                     agent_messages,
                     {"type": "json_object"},
-                    call_type="agent"
+                    call_type="agent",
+                    progress_container=progress_container
                 )
 
                 # Parse JSON with fallback repair
@@ -10824,7 +10892,8 @@ Use all the information above to compile the final answer."""}
                                 o3_client,
                                 o3_deployment,
                                 context_limits,
-                                display_scratchpad
+                                display_scratchpad,
+                                query_expander  # Pass query_expander for progress bar display
                             )
                             future_to_task[future] = task_obj
                             # PREVENTIVE stagger: Prevents all parallel agents from hitting API simultaneously
