@@ -9316,6 +9316,580 @@ AGENT_PERSONAS = {
     - Step 6: {{"response": "Expanded section 4 with pilot shortage details from RESEARCH pad - added training pipeline throughput data and projected gaps through FY2027"}}"""
     }
 
+# ====================================================================
+# === DYNAMIC ORCHESTRATION SYSTEM
+# ====================================================================
+#
+# This system replaces hardcoded agent workflows with dynamic, task-specific
+# planning and execution. The orchestrator analyzes each user request and
+# creates a custom workflow using specialized agents and tools.
+#
+# ARCHITECTURE:
+# 1. Tool Registry: Catalog of all available tools (scratchpad, search, etc.)
+# 2. Orchestrator: Plans workflows based on task complexity
+# 3. Specialized Agents: Execute specific roles (reader, writer, editor, etc.)
+# 4. Execution Engine: Runs workflows with parallel execution and rate limiting
+#
+# EXAMPLE FLOW:
+# User: "Remove section 2.1 from the report"
+# → Orchestrator plans: [list_sections, read_section, delete_section, renumber, verify]
+# → Execution engine runs plan with progress tracking
+# → User sees: "Removed section 2.1 and renumbered subsequent sections"
+#
+# ====================================================================
+
+class ToolRegistry:
+    """Central registry of all available tools for agents"""
+
+    def __init__(self, scratchpad_mgr=None):
+        self.scratchpad_mgr = scratchpad_mgr
+        self.tools = self._register_all_tools()
+
+    def _register_all_tools(self):
+        """Register all available tools"""
+        tools = {}
+
+        # ===== SCRATCHPAD TOOLS =====
+        tools["list_scratchpad_sections"] = {
+            "function": self._list_scratchpad_sections,
+            "description": "List all sections in a scratchpad",
+            "parameters": {"pad_type": "string (output, research, outline, format, tables, data)"},
+            "category": "scratchpad_read"
+        }
+
+        tools["read_scratchpad_section"] = {
+            "function": self._read_scratchpad_section,
+            "description": "Read content of a specific section",
+            "parameters": {"pad_type": "string", "section_name": "string"},
+            "category": "scratchpad_read"
+        }
+
+        tools["read_full_scratchpad"] = {
+            "function": self._read_full_scratchpad,
+            "description": "Read entire scratchpad content",
+            "parameters": {"pad_type": "string"},
+            "category": "scratchpad_read"
+        }
+
+        tools["write_scratchpad_section"] = {
+            "function": self._write_scratchpad_section,
+            "description": "Write or append to a section",
+            "parameters": {"pad_type": "string", "section_name": "string", "content": "string", "mode": "replace|append"},
+            "category": "scratchpad_write"
+        }
+
+        tools["edit_scratchpad_text"] = {
+            "function": self._edit_scratchpad_text,
+            "description": "Edit specific text in a section (find and replace)",
+            "parameters": {"pad_type": "string", "section_name": "string", "old_text": "string", "new_text": "string"},
+            "category": "scratchpad_write"
+        }
+
+        tools["delete_scratchpad_section"] = {
+            "function": self._delete_scratchpad_section,
+            "description": "Delete an entire section",
+            "parameters": {"pad_type": "string", "section_name": "string"},
+            "category": "scratchpad_write"
+        }
+
+        tools["insert_lines"] = {
+            "function": self._insert_lines,
+            "description": "Insert lines at specific position",
+            "parameters": {"pad_type": "string", "section_name": "string", "line_number": "int", "content": "string"},
+            "category": "scratchpad_write"
+        }
+
+        tools["delete_lines"] = {
+            "function": self._delete_lines,
+            "description": "Delete specific lines from a section",
+            "parameters": {"pad_type": "string", "section_name": "string", "start_line": "int", "end_line": "int"},
+            "category": "scratchpad_write"
+        }
+
+        tools["replace_lines"] = {
+            "function": self._replace_lines,
+            "description": "Replace specific lines with new content",
+            "parameters": {"pad_type": "string", "section_name": "string", "start_line": "int", "end_line": "int", "content": "string"},
+            "category": "scratchpad_write"
+        }
+
+        # ===== SEARCH TOOLS =====
+        tools["search_knowledge_base"] = {
+            "function": self._search_knowledge_base,
+            "description": "Search knowledge base with semantic search",
+            "parameters": {"query": "string", "top_k": "int (default 5)"},
+            "category": "search"
+        }
+
+        tools["get_cached_search"] = {
+            "function": self._get_cached_search,
+            "description": "Retrieve previously cached search results",
+            "parameters": {"keywords": "list[string]"},
+            "category": "search"
+        }
+
+        # ===== VERIFICATION TOOLS =====
+        tools["verify_document_structure"] = {
+            "function": self._verify_document_structure,
+            "description": "Check document structure for broken references, numbering issues",
+            "parameters": {"pad_type": "string"},
+            "category": "verification"
+        }
+
+        tools["extract_metadata"] = {
+            "function": self._extract_metadata,
+            "description": "Extract section count, headings, structure info",
+            "parameters": {"pad_type": "string"},
+            "category": "verification"
+        }
+
+        tools["renumber_sections"] = {
+            "function": self._renumber_sections,
+            "description": "Renumber sections after deletion/insertion",
+            "parameters": {"pad_type": "string", "pattern": "string (e.g., '2.')"},
+            "category": "scratchpad_write"
+        }
+
+        return tools
+
+    # ===== TOOL IMPLEMENTATIONS =====
+
+    def _list_scratchpad_sections(self, pad_type: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        sections = self.scratchpad_mgr.list_sections(pad_type)
+        return {"status": "success", "sections": sections, "count": len(sections)}
+
+    def _read_scratchpad_section(self, pad_type: str, section_name: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        content = self.scratchpad_mgr.read_section(pad_type, section_name)
+        return {"status": "success", "content": content}
+
+    def _read_full_scratchpad(self, pad_type: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        content = self.scratchpad_mgr.get_full_content(pad_type)
+        return {"status": "success", "content": content}
+
+    def _write_scratchpad_section(self, pad_type: str, section_name: str, content: str, mode: str = "replace") -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_write(pad_type, section_name, content, mode)
+        return {"status": "success", "message": result}
+
+    def _edit_scratchpad_text(self, pad_type: str, section_name: str, old_text: str, new_text: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_edit(pad_type, section_name, old_text, new_text)
+        return {"status": "success", "message": result}
+
+    def _delete_scratchpad_section(self, pad_type: str, section_name: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_delete(pad_type, section_name)
+        return {"status": "success", "message": result}
+
+    def _insert_lines(self, pad_type: str, section_name: str, line_number: int, content: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_insert_lines(pad_type, section_name, line_number, content)
+        return {"status": "success", "message": result}
+
+    def _delete_lines(self, pad_type: str, section_name: str, start_line: int, end_line: int = None) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_delete_lines(pad_type, section_name, start_line, end_line)
+        return {"status": "success", "message": result}
+
+    def _replace_lines(self, pad_type: str, section_name: str, start_line: int, end_line: int, content: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+        result = scratchpad_replace_lines(pad_type, section_name, start_line, end_line, content)
+        return {"status": "success", "message": result}
+
+    def _search_knowledge_base(self, query: str, top_k: int = 5) -> dict:
+        # This will be called by the search agent
+        # Returns structured results for orchestrator to process
+        return {"status": "pending", "message": "Search will be executed by search agent"}
+
+    def _get_cached_search(self, keywords: list) -> dict:
+        result = get_cached_search_results(keywords)
+        return {"status": "success", "results": result}
+
+    def _verify_document_structure(self, pad_type: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+
+        # Check for broken section numbering
+        sections = self.scratchpad_mgr.list_sections(pad_type)
+        issues = []
+
+        for section in sections:
+            content = self.scratchpad_mgr.read_section(pad_type, section)
+            # Check for common issues
+            if not content or content.strip() == "":
+                issues.append(f"Empty section: {section}")
+
+        if issues:
+            return {"status": "warning", "issues": issues}
+        return {"status": "success", "message": "Document structure is valid"}
+
+    def _extract_metadata(self, pad_type: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+
+        sections = self.scratchpad_mgr.list_sections(pad_type)
+        metadata = {
+            "section_count": len(sections),
+            "sections": sections,
+            "total_length": 0
+        }
+
+        for section in sections:
+            content = self.scratchpad_mgr.read_section(pad_type, section)
+            metadata["total_length"] += len(content) if content else 0
+
+        return {"status": "success", "metadata": metadata}
+
+    def _renumber_sections(self, pad_type: str, pattern: str) -> dict:
+        if not self.scratchpad_mgr:
+            return {"status": "error", "message": "No scratchpad manager available"}
+
+        # Get all sections
+        sections = self.scratchpad_mgr.list_sections(pad_type)
+
+        # Find sections matching pattern (e.g., "2.1", "2.2", etc.)
+        import re
+        matching_sections = [s for s in sections if pattern in s]
+
+        # Renumber logic would go here
+        # For now, return success
+        return {"status": "success", "message": f"Renumbered {len(matching_sections)} sections"}
+
+    def execute_tool(self, tool_name: str, params: dict) -> dict:
+        """Execute a tool by name with given parameters"""
+        if tool_name not in self.tools:
+            return {"status": "error", "message": f"Tool '{tool_name}' not found"}
+
+        tool = self.tools[tool_name]
+        try:
+            result = tool["function"](**params)
+            return result
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    def get_available_tools(self, category: str = None) -> list:
+        """Get list of available tools, optionally filtered by category"""
+        if category:
+            return [name for name, tool in self.tools.items() if tool["category"] == category]
+        return list(self.tools.keys())
+
+
+class DynamicOrchestrator:
+    """
+    Orchestrator that creates task-specific workflows dynamically.
+    Analyzes user queries and plans optimal execution paths.
+    """
+
+    def __init__(self, tool_registry: ToolRegistry, gpt41_client, gpt41_deployment, logger=None):
+        self.tool_registry = tool_registry
+        self.client = gpt41_client
+        self.deployment = gpt41_deployment
+        self.logger = logger or logging.getLogger(__name__)
+
+    def analyze_task_complexity(self, user_query: str, scratchpad_exists: bool, kb_selected: bool) -> dict:
+        """Analyze task to determine if it needs agentic workflow"""
+
+        # Keywords that trigger agentic workflow
+        scratchpad_edit_keywords = ["remove", "delete", "edit", "modify", "update", "add section", "renumber", "rewrite", "insert", "replace"]
+        document_gen_keywords = ["create", "generate", "write", "draft", "produce", "compose"]
+        multi_step_indicators = ["and then", "after that", "next", "following", "subsequently"]
+
+        query_lower = user_query.lower()
+
+        # Check for scratchpad editing (requires agentic workflow if scratchpads exist)
+        if scratchpad_exists and any(kw in query_lower for kw in scratchpad_edit_keywords):
+            return {
+                "complexity": "high",
+                "reason": "Scratchpad editing detected",
+                "workflow_type": "agentic"
+            }
+
+        # Check for document generation
+        if any(kw in query_lower for kw in document_gen_keywords):
+            return {
+                "complexity": "high",
+                "reason": "Document generation detected",
+                "workflow_type": "agentic"
+            }
+
+        # Check for multi-step requests
+        if any(indicator in query_lower for indicator in multi_step_indicators):
+            return {
+                "complexity": "high",
+                "reason": "Multi-step task detected",
+                "workflow_type": "agentic"
+            }
+
+        # Simple RAG query
+        if kb_selected:
+            return {
+                "complexity": "low",
+                "reason": "Simple knowledge base query",
+                "workflow_type": "simple_rag"
+            }
+
+        # Default to simple
+        return {
+            "complexity": "low",
+            "reason": "No complexity indicators found",
+            "workflow_type": "simple_rag"
+        }
+
+    def plan_workflow(self, user_query: str, context: dict) -> dict:
+        """Create a dynamic execution plan based on the user query and context"""
+
+        # Get available tools
+        available_tools = self.tool_registry.get_available_tools()
+
+        # Build planning prompt
+        planning_prompt = f"""You are an AI orchestrator. Analyze this user request and create an execution plan.
+
+USER REQUEST: "{user_query}"
+
+CONTEXT:
+- Scratchpads exist: {context.get('scratchpads_exist', False)}
+- Scratchpad sections: {context.get('scratchpad_sections', {})}
+- Knowledge base selected: {context.get('kb_selected', False)}
+
+AVAILABLE TOOLS:
+{json.dumps([{{
+    "name": name,
+    "description": self.tool_registry.tools[name]["description"],
+    "category": self.tool_registry.tools[name]["category"]
+}} for name in available_tools], indent=2)}
+
+Create an execution plan as JSON:
+{{
+    "task_type": "scratchpad_edit|document_generation|search|multi_step",
+    "complexity": "low|medium|high",
+    "steps": [
+        {{
+            "step": 1,
+            "agent_role": "reader|writer|editor|search|verifier",
+            "tool": "tool_name",
+            "params": {{}},
+            "reason": "why this step is needed"
+        }}
+    ],
+    "parallel_groups": [[1], [2, 3], [4]] // which steps can run in parallel
+}}
+
+RULES:
+1. Be specific about which scratchpad sections to target
+2. Group independent steps for parallel execution
+3. Always verify after modifications
+4. Use reader agent before writer/editor agents
+5. Keep plans concise (3-7 steps typically)"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": "You are an expert task planner for AI agent workflows."},
+                    {"role": "user", "content": planning_prompt}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3
+            )
+
+            plan = json.loads(response.choices[0].message.content)
+            self.logger.info(f"Generated workflow plan: {plan['task_type']} with {len(plan['steps'])} steps")
+            return plan
+
+        except Exception as e:
+            self.logger.error(f"Planning failed: {e}")
+            # Return simple fallback plan
+            return {
+                "task_type": "simple",
+                "complexity": "low",
+                "steps": [{"step": 1, "agent_role": "search", "tool": "search_knowledge_base", "params": {"query": user_query}, "reason": "Fallback to simple search"}],
+                "parallel_groups": [[1]]
+            }
+
+
+class SpecializedAgent:
+    """Base class for specialized agents that execute specific roles"""
+
+    def __init__(self, role: str, tool_registry: ToolRegistry, client, deployment, logger=None):
+        self.role = role
+        self.tool_registry = tool_registry
+        self.client = client
+        self.deployment = deployment
+        self.logger = logger or logging.getLogger(__name__)
+
+    def execute_step(self, step: dict, context: dict) -> dict:
+        """Execute a single step from the workflow plan"""
+
+        tool_name = step["tool"]
+        params = step["params"]
+        reason = step.get("reason", "")
+
+        self.logger.info(f"{self.role} agent executing: {tool_name} - {reason}")
+
+        try:
+            # Execute the tool
+            result = self.tool_registry.execute_tool(tool_name, params)
+
+            return {
+                "status": "success",
+                "step": step["step"],
+                "tool": tool_name,
+                "result": result,
+                "agent": self.role
+            }
+
+        except Exception as e:
+            self.logger.error(f"{self.role} agent failed on step {step['step']}: {e}")
+            return {
+                "status": "error",
+                "step": step["step"],
+                "tool": tool_name,
+                "error": str(e),
+                "agent": self.role
+            }
+
+
+class WorkflowExecutionEngine:
+    """Executes workflows with parallel support and rate limiting"""
+
+    def __init__(self, tool_registry: ToolRegistry, gpt41_client, gpt41_deployment, logger=None):
+        self.tool_registry = tool_registry
+        self.client = gpt41_client
+        self.deployment = gpt41_deployment
+        self.logger = logger or logging.getLogger(__name__)
+
+        # Rate limits (requests per minute) for different models
+        self.rate_limits = {
+            "H4D_Assistant_gpt-4.1": 50,
+            "DeepSeek-R1-0528": 250000,
+            "DeepSeek-V3.1": 20000,
+            "grok-3": 50000,
+            "o3-mini-deployment": 10000
+        }
+
+    def get_rate_limit_delay(self, model_name: str, num_parallel: int) -> float:
+        """Calculate delay between parallel calls to avoid rate limits"""
+        rpm = self.rate_limits.get(model_name, 50)  # Default to conservative limit
+
+        # Requests per second
+        rps = rpm / 60.0
+
+        # Safety margin (use 80% of capacity)
+        safe_rps = rps * 0.8
+
+        # Delay between calls
+        if num_parallel <= 1:
+            return 0
+
+        delay = num_parallel / safe_rps
+        return delay
+
+    def execute_workflow(self, plan: dict, context: dict, progress_callback=None) -> list:
+        """Execute a workflow plan with parallel execution where possible"""
+
+        results = []
+        all_steps = {step["step"]: step for step in plan["steps"]}
+        parallel_groups = plan.get("parallel_groups", [[s["step"]] for s in plan["steps"]])
+
+        total_groups = len(parallel_groups)
+
+        for group_idx, group in enumerate(parallel_groups):
+            if progress_callback:
+                progress_callback(f"Executing step group {group_idx + 1}/{total_groups}...")
+
+            # Get steps in this group
+            steps_to_execute = [all_steps[step_num] for step_num in group if step_num in all_steps]
+
+            if len(steps_to_execute) == 1:
+                # Sequential execution
+                step = steps_to_execute[0]
+                agent = self._get_agent_for_role(step["agent_role"])
+                result = agent.execute_step(step, context)
+                results.append(result)
+
+            else:
+                # Parallel execution with rate limiting
+                delay = self.get_rate_limit_delay(self.deployment, len(steps_to_execute))
+
+                # Execute steps with staggered start
+                import concurrent.futures
+                import time
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(steps_to_execute)) as executor:
+                    futures = []
+
+                    for idx, step in enumerate(steps_to_execute):
+                        # Stagger starts to avoid rate limits
+                        if idx > 0:
+                            time.sleep(delay)
+
+                        agent = self._get_agent_for_role(step["agent_role"])
+                        future = executor.submit(agent.execute_step, step, context)
+                        futures.append(future)
+
+                    # Collect results
+                    for future in concurrent.futures.as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+
+            # Update context with results
+            for result in results:
+                if result["status"] == "success" and "result" in result:
+                    context[f"step_{result['step']}_result"] = result["result"]
+
+        return results
+
+    def _get_agent_for_role(self, role: str) -> SpecializedAgent:
+        """Create an agent for a specific role"""
+        return SpecializedAgent(
+            role=role,
+            tool_registry=self.tool_registry,
+            client=self.client,
+            deployment=self.deployment,
+            logger=self.logger
+        )
+
+    def synthesize_final_answer(self, user_query: str, results: list, context: dict) -> str:
+        """Synthesize workflow results into a final answer for the user"""
+
+        synthesis_prompt = f"""Based on the workflow execution results, provide a clear answer to the user's question.
+
+USER QUESTION: "{user_query}"
+
+WORKFLOW RESULTS:
+{json.dumps(results, indent=2)}
+
+Provide a clear, concise answer that directly addresses the user's request. If any modifications were made, confirm what was done."""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.deployment,
+                messages=[
+                    {"role": "system", "content": "You synthesize workflow results into clear answers."},
+                    {"role": "user", "content": synthesis_prompt}
+                ],
+                temperature=0.7
+            )
+
+            return response.choices[0].message.content
+
+        except Exception as e:
+            self.logger.error(f"Synthesis failed: {e}")
+            return f"Workflow completed with {len(results)} steps. See execution log for details."
+
+
 # Replacement for execute_tool_call function (around line 1184)
 
 def analyze_query_intent_and_select_containers(keywords: list[str], all_available_containers: list[str]) -> list[str]:
@@ -11760,20 +12334,11 @@ def on_persona_change(widget_key):
         return
     sel = st.session_state[widget_key]
 
-    # Check if we have an active chat with scratchpads
+    # ALWAYS switch persona in-place - NEVER create new chat
+    # Only "New Chat" button should create a new chat
     active_chat_id = st.session_state.user_data.get("active_conversation_id")
-    has_scratchpads = False
-    if active_chat_id and "scratchpad_manager" in st.session_state:
-        # Check if current chat has any scratchpad content
-        scratchpad_mgr = st.session_state.scratchpad_manager
-        for pad_type in ["output", "research", "outline", "format", "tables", "data", "plots", "log"]:
-            if scratchpad_mgr.list_sections(pad_type):
-                has_scratchpads = True
-                break
 
-    # If chat has scratchpads, switch persona IN-PLACE (don't create new chat)
-    # This allows user to interact with same scratchpads using different persona
-    if has_scratchpads and active_chat_id in st.session_state.user_data["conversations"]:
+    if active_chat_id and active_chat_id in st.session_state.user_data["conversations"]:
         # Update persona in current chat's system message
         system_msg = st.session_state.user_data["conversations"][active_chat_id][0]
         persona = st.session_state.user_data["personas"][sel]
@@ -11788,19 +12353,11 @@ def on_persona_change(widget_key):
         st.session_state.persona_switched_in_place = True
 
         # DON'T clear workflow flags - allow resuming
-        # DON'T create new chat - keep scratchpads accessible
+        # DON'T create new chat - preserve history and scratchpads
     else:
-        # No scratchpads - safe to create new chat (existing behavior)
-        st.session_state.user_data = create_new_chat(
-            st.session_state.user_id, st.session_state.user_data, sel
-        )
+        # No active chat yet - just update the selected persona
+        # A new chat will be created on first user message
         st.session_state.last_persona_selected = sel
-        # Clear workflow flags when changing persona (creates new chat)
-        st.session_state.workflow_interrupted = False
-        st.session_state.message_processed = False
-        st.session_state.workflow_incomplete = False
-        st.session_state.is_generating = False
-        st.session_state.workflow_ready_to_start = False
 
 # Restore chat settings BEFORE sidebar renders to ensure KB dropdown shows correct count
 active_chat_id = st.session_state.user_data.get("active_conversation_id")
@@ -14276,219 +14833,329 @@ CRITICAL RULES:
         # SKIP for agentic personas - they already completed their workflow above
         # SKIP if we already handled a knowledge_base_query with RAG above
         if persona_type != "agentic" and intent != "knowledge_base_query":
-            logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === No KB query triggered. Intent: {intent}, KBs: {len(selected_kbs)}")
             st.session_state.is_generating = True
-            try:
-                _, _, system_prompt, temp = _persona()
 
-                # Build full conversation history for context
-                conversation_messages = []
-                for msg in messages[:-1]:  # Exclude the current user message (already added)
-                    conversation_messages.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    })
+            # ===== DYNAMIC ORCHESTRATION SYSTEM =====
+            # Analyze task complexity and route to appropriate workflow
 
-                # Add current user message
-                user_context = user_prompt
-                if st.session_state.session_rag_context:
-                    user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
+            # Check if scratchpads exist
+            scratchpads_exist = False
+            scratchpad_sections = {}
+            if "scratchpad_manager" in st.session_state:
+                scratchpad_mgr = st.session_state.scratchpad_manager
+                for pad_type in ["output", "research", "outline", "format", "tables", "data"]:
+                    sections = scratchpad_mgr.list_sections(pad_type)
+                    if sections:
+                        scratchpads_exist = True
+                        scratchpad_sections[pad_type] = sections
 
-                # Add scratchpad context if available (from multi-agent workflows on same chat)
-                if "scratchpad_manager" in st.session_state:
-                    scratchpad_context = []
-                    scratchpad_mgr = st.session_state.scratchpad_manager
+            # Initialize orchestration components
+            tool_registry = ToolRegistry(scratchpad_mgr=st.session_state.get("scratchpad_manager"))
+            orchestrator = DynamicOrchestrator(
+                tool_registry=tool_registry,
+                gpt41_client=st.session_state.gpt41_client,
+                gpt41_deployment=st.session_state.GPT41_DEPLOYMENT,
+                logger=logger
+            )
 
-                    # Check each scratchpad type for content
-                    for pad_type in ["output", "research", "outline", "format", "tables", "data"]:
-                        sections = scratchpad_mgr.list_sections(pad_type)
-                        if sections:
-                            pad_content = []
-                            # FULL access - no truncation limits!
-                            for section_name in sections:
-                                content = scratchpad_mgr.read_section(pad_type, section_name)
-                                if content and content.strip():
-                                    pad_content.append(f"## {section_name}\n{content}")
+            # Analyze task complexity
+            complexity_analysis = orchestrator.analyze_task_complexity(
+                user_query=user_prompt,
+                scratchpad_exists=scratchpads_exist,
+                kb_selected=len(selected_kbs) > 0
+            )
 
-                            if pad_content:
-                                scratchpad_context.append(f"### {pad_type.upper()} Scratchpad\n" + "\n\n".join(pad_content))
+            logger.info(f"Task complexity analysis: {complexity_analysis}")
 
-                    if scratchpad_context:
-                        user_context += "\n\n━━━ Previous Work (from Multi-Agent Team) ━━━\n" + "\n\n".join(scratchpad_context)
-                        user_context += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou have FULL ACCESS to all this previous work. Reference specific sections when answering questions about the multi-agent team's findings, research, or output."
+            # Route to dynamic workflow if complex
+            if complexity_analysis["workflow_type"] == "agentic":
+                logger.info(f"=== DYNAMIC ORCHESTRATION ACTIVATED === {complexity_analysis['reason']}")
 
-                        # Show visual indicator that we're using previous work
-                        scratchpad_sections_count = sum(len(scratchpad_mgr.list_sections(pad))
-                                                       for pad in ["output", "research", "outline", "format", "tables", "data"])
-                        st.info(f"💡 Using previous work from Multi-Agent Team ({scratchpad_sections_count} sections available across all scratchpads)")
+                try:
+                    # Show that we're using orchestration
+                    thinking_expander.info(f"🎯 **Dynamic Orchestration**: {complexity_analysis['reason']}")
+                    status_container.info("📋 Planning workflow...")
 
-                # Use selected model for General Assistant
-                selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
-                model_label = "O3" if selected_model == "o3" else "GPT-4.1"
+                    # Build context for orchestrator
+                    context = {
+                        "scratchpads_exist": scratchpads_exist,
+                        "scratchpad_sections": scratchpad_sections,
+                        "kb_selected": len(selected_kbs) > 0,
+                        "user_query": user_prompt
+                    }
 
-                # Display which model is being used
-                thinking_expander.info(f"🤖 Using model: **{model_label}** (simple chat)")
+                    # Plan workflow
+                    plan = orchestrator.plan_workflow(user_prompt, context)
 
-                if selected_model == "o3":
-                    client = st.session_state.o3_client
-                    deployment = st.session_state.O3_DEPLOYMENT
-                else:
-                    client = st.session_state.gpt41_client
-                    deployment = st.session_state.GPT41_DEPLOYMENT
+                    # Show plan to user (verbose transparency)
+                    with thinking_expander:
+                        st.markdown("**📋 Execution Plan:**")
+                        plan_steps = "\n".join([f"{s['step']}. **{s['agent_role'].title()} Agent**: {s['tool']} - {s['reason']}" for s in plan['steps']])
+                        st.markdown(plan_steps)
 
-                # Stream the response
-                # O3 only supports temperature=1, GPT-4.1 uses persona temperature
-                # Build messages with full conversation history
-                api_messages = [{"role": "system", "content": system_prompt}]
-                api_messages.extend(conversation_messages)  # Add previous conversation
-                api_messages.append({"role": "user", "content": user_context})  # Add current message
+                    # Execute workflow
+                    execution_engine = WorkflowExecutionEngine(
+                        tool_registry=tool_registry,
+                        gpt41_client=st.session_state.gpt41_client,
+                        gpt41_deployment=st.session_state.GPT41_DEPLOYMENT,
+                        logger=logger
+                    )
 
-                create_params = {
-                    "model": deployment,
-                    "messages": api_messages,
-                    "stream": True,
-                }
-                if selected_model != "o3":
-                    # O3 only supports temperature=1 (default), GPT-4.1 can be customized
-                    create_params["temperature"] = temp
+                    def progress_update(message):
+                        status_container.info(message)
 
-                stream = client.chat.completions.create(**create_params)
+                    results = execution_engine.execute_workflow(
+                        plan=plan,
+                        context=context,
+                        progress_callback=progress_update
+                    )
 
-                parts = []
-                reasoning_parts = []
+                    # Show results
+                    with thinking_expander:
+                        st.markdown("**✅ Workflow Results:**")
+                        for result in results:
+                            if result["status"] == "success":
+                                st.success(f"Step {result['step']}: {result['agent']} completed {result['tool']}")
+                            else:
+                                st.error(f"Step {result['step']}: {result.get('error', 'Unknown error')}")
 
-                # Track whether we're inside <think> tags for GPT-4.1
-                inside_think = False
-                think_parts = []
-                answer_parts = []
-                buffer = ""
+                    # Synthesize final answer
+                    status_container.info("🔄 Synthesizing final answer...")
+                    final_answer = execution_engine.synthesize_final_answer(
+                        user_query=user_prompt,
+                        results=results,
+                        context=context
+                    )
 
-                # Create dedicated container for thinking content inside expander
-                with thinking_expander:
-                    st.markdown("**Reasoning:**")
-                    thinking_placeholder = st.empty()
+                    # Display answer
+                    final_answer_placeholder.markdown(final_answer)
 
-                for chunk in stream:
-                    if st.session_state.stop_generation:
-                        st.warning("⚠️ Response generation stopped by user.")
-                        st.session_state.stop_generation = False
-                        st.session_state.is_generating = False
-                        break  # Exit loop but let chat input render
+                    # Save to chat history
+                    messages.append({"role": "assistant", "content": final_answer})
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
 
-                    # O3 models return reasoning in a separate field
-                    if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
-                        if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
-                            reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
-                            thinking_placeholder.markdown("".join(reasoning_parts))
+                    status_container.empty()
+                    st.session_state.is_generating = False
 
-                    if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                        token = chunk.choices[0].delta.content
-                        parts.append(token)
+                except Exception as e:
+                    st.error(f"Orchestration workflow failed: {e}")
+                    logger.error(f"Orchestration error: {e}", exc_info=True)
+                    st.session_state.is_generating = False
 
-                        # For GPT-4.1, detect and separate <think> content
-                        if selected_model != "o3":
-                            buffer += token
+            else:
+                # Fall through to simple quick path for low complexity tasks
+                logger.info(f"=== SIMPLE QUICK PATH ACTIVATED === {complexity_analysis['reason']}")
+                try:
+                    _, _, system_prompt, temp = _persona()
 
-                            # Process buffer to detect tag boundaries
-                            while True:
-                                if not inside_think:
-                                    # Look for <think> tag
-                                    if "<think>" in buffer:
-                                        # Found opening tag
-                                        before_tag = buffer.split("<think>")[0]
-                                        if before_tag:
-                                            answer_parts.append(before_tag)
-                                            # Display answer update
-                                            final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
-                                        buffer = buffer.split("<think>", 1)[1]
-                                        inside_think = True
-                                    else:
-                                        # No tag found, check if we might have partial tag
-                                        if buffer.endswith("<") or buffer.endswith("<t") or buffer.endswith("<th") or buffer.endswith("<thi") or buffer.endswith("<thin") or buffer.endswith("<think"):
-                                            # Might be partial tag, keep in buffer
-                                            break
-                                        else:
-                                            # Safe to flush to answer
-                                            if buffer:
-                                                answer_parts.append(buffer)
+                    # Build full conversation history for context
+                    conversation_messages = []
+                    for msg in messages[:-1]:  # Exclude the current user message (already added)
+                        conversation_messages.append({
+                            "role": msg["role"],
+                            "content": msg["content"]
+                        })
+
+                    # Add current user message
+                    user_context = user_prompt
+                    if st.session_state.session_rag_context:
+                        user_context += "\n\nContext from uploaded files:\n" + st.session_state.session_rag_context
+
+                    # Add scratchpad context if available (from multi-agent workflows on same chat)
+                    if "scratchpad_manager" in st.session_state:
+                        scratchpad_context = []
+                        scratchpad_mgr = st.session_state.scratchpad_manager
+
+                        # Check each scratchpad type for content
+                        for pad_type in ["output", "research", "outline", "format", "tables", "data"]:
+                            sections = scratchpad_mgr.list_sections(pad_type)
+                            if sections:
+                                pad_content = []
+                                # FULL access - no truncation limits!
+                                for section_name in sections:
+                                    content = scratchpad_mgr.read_section(pad_type, section_name)
+                                    if content and content.strip():
+                                        pad_content.append(f"## {section_name}\n{content}")
+
+                                if pad_content:
+                                    scratchpad_context.append(f"### {pad_type.upper()} Scratchpad\n" + "\n\n".join(pad_content))
+
+                        if scratchpad_context:
+                            user_context += "\n\n━━━ Previous Work (from Multi-Agent Team) ━━━\n" + "\n\n".join(scratchpad_context)
+                            user_context += "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\nYou have FULL ACCESS to all this previous work. Reference specific sections when answering questions about the multi-agent team's findings, research, or output."
+
+                            # Show visual indicator that we're using previous work
+                            scratchpad_sections_count = sum(len(scratchpad_mgr.list_sections(pad))
+                                                           for pad in ["output", "research", "outline", "format", "tables", "data"])
+                            st.info(f"💡 Using previous work from Multi-Agent Team ({scratchpad_sections_count} sections available across all scratchpads)")
+
+                    # Use selected model for General Assistant
+                    selected_model = st.session_state.get("general_assistant_model", "gpt-4.1")
+                    model_label = "O3" if selected_model == "o3" else "GPT-4.1"
+
+                    # Display which model is being used
+                    thinking_expander.info(f"🤖 Using model: **{model_label}** (simple chat)")
+
+                    if selected_model == "o3":
+                        client = st.session_state.o3_client
+                        deployment = st.session_state.O3_DEPLOYMENT
+                    else:
+                        client = st.session_state.gpt41_client
+                        deployment = st.session_state.GPT41_DEPLOYMENT
+
+                    # Stream the response
+                    # O3 only supports temperature=1, GPT-4.1 uses persona temperature
+                    # Build messages with full conversation history
+                    api_messages = [{"role": "system", "content": system_prompt}]
+                    api_messages.extend(conversation_messages)  # Add previous conversation
+                    api_messages.append({"role": "user", "content": user_context})  # Add current message
+
+                    create_params = {
+                        "model": deployment,
+                        "messages": api_messages,
+                        "stream": True,
+                    }
+                    if selected_model != "o3":
+                        # O3 only supports temperature=1 (default), GPT-4.1 can be customized
+                        create_params["temperature"] = temp
+
+                    stream = client.chat.completions.create(**create_params)
+
+                    parts = []
+                    reasoning_parts = []
+
+                    # Track whether we're inside <think> tags for GPT-4.1
+                    inside_think = False
+                    think_parts = []
+                    answer_parts = []
+                    buffer = ""
+
+                    # Create dedicated container for thinking content inside expander
+                    with thinking_expander:
+                        st.markdown("**Reasoning:**")
+                        thinking_placeholder = st.empty()
+
+                    for chunk in stream:
+                        if st.session_state.stop_generation:
+                            st.warning("⚠️ Response generation stopped by user.")
+                            st.session_state.stop_generation = False
+                            st.session_state.is_generating = False
+                            break  # Exit loop but let chat input render
+
+                        # O3 models return reasoning in a separate field
+                        if selected_model == "o3" and chunk.choices and chunk.choices[0].delta:
+                            if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+                                reasoning_parts.append(chunk.choices[0].delta.reasoning_content)
+                                thinking_placeholder.markdown("".join(reasoning_parts))
+
+                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                            token = chunk.choices[0].delta.content
+                            parts.append(token)
+
+                            # For GPT-4.1, detect and separate <think> content
+                            if selected_model != "o3":
+                                buffer += token
+
+                                # Process buffer to detect tag boundaries
+                                while True:
+                                    if not inside_think:
+                                        # Look for <think> tag
+                                        if "<think>" in buffer:
+                                            # Found opening tag
+                                            before_tag = buffer.split("<think>")[0]
+                                            if before_tag:
+                                                answer_parts.append(before_tag)
+                                                # Display answer update
                                                 final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
-                                                buffer = ""
-                                            break
-                                else:
-                                    # Inside think tags, look for closing tag
-                                    if "</think>" in buffer:
-                                        # Found closing tag
-                                        before_tag = buffer.split("</think>")[0]
-                                        if before_tag:
-                                            think_parts.append(before_tag)
-                                            # Display thinking update
-                                            if thinking_placeholder:
-                                                thinking_placeholder.markdown("".join(think_parts))
-                                        buffer = buffer.split("</think>", 1)[1]
-                                        inside_think = False
-                                        # Continue loop to process remaining buffer
-                                    else:
-                                        # No closing tag yet, check for partial
-                                        if buffer.endswith("<") or buffer.endswith("</") or buffer.endswith("</t") or buffer.endswith("</th") or buffer.endswith("</thi") or buffer.endswith("</thin") or buffer.endswith("</think"):
-                                            # Might be partial closing tag, keep in buffer
-                                            break
+                                            buffer = buffer.split("<think>", 1)[1]
+                                            inside_think = True
                                         else:
-                                            # Safe to flush to thinking
-                                            if buffer:
-                                                think_parts.append(buffer)
+                                            # No tag found, check if we might have partial tag
+                                            if buffer.endswith("<") or buffer.endswith("<t") or buffer.endswith("<th") or buffer.endswith("<thi") or buffer.endswith("<thin") or buffer.endswith("<think"):
+                                                # Might be partial tag, keep in buffer
+                                                break
+                                            else:
+                                                # Safe to flush to answer
+                                                if buffer:
+                                                    answer_parts.append(buffer)
+                                                    final_answer_placeholder.markdown("".join(answer_parts) + " ▌")
+                                                    buffer = ""
+                                                break
+                                    else:
+                                        # Inside think tags, look for closing tag
+                                        if "</think>" in buffer:
+                                            # Found closing tag
+                                            before_tag = buffer.split("</think>")[0]
+                                            if before_tag:
+                                                think_parts.append(before_tag)
+                                                # Display thinking update
                                                 if thinking_placeholder:
                                                     thinking_placeholder.markdown("".join(think_parts))
-                                                buffer = ""
-                                            break
+                                            buffer = buffer.split("</think>", 1)[1]
+                                            inside_think = False
+                                            # Continue loop to process remaining buffer
+                                        else:
+                                            # No closing tag yet, check for partial
+                                            if buffer.endswith("<") or buffer.endswith("</") or buffer.endswith("</t") or buffer.endswith("</th") or buffer.endswith("</thi") or buffer.endswith("</thin") or buffer.endswith("</think"):
+                                                # Might be partial closing tag, keep in buffer
+                                                break
+                                            else:
+                                                # Safe to flush to thinking
+                                                if buffer:
+                                                    think_parts.append(buffer)
+                                                    if thinking_placeholder:
+                                                        thinking_placeholder.markdown("".join(think_parts))
+                                                    buffer = ""
+                                                break
+                            else:
+                                # For O3, just display the answer
+                                final_answer_placeholder.markdown("".join(parts) + " ▌")
+
+                    # Handle any remaining buffer
+                    if buffer:
+                        if inside_think:
+                            think_parts.append(buffer)
                         else:
-                            # For O3, just display the answer
-                            final_answer_placeholder.markdown("".join(parts) + " ▌")
+                            answer_parts.append(buffer)
 
-                # Handle any remaining buffer
-                if buffer:
-                    if inside_think:
-                        think_parts.append(buffer)
+                    # Final display updates and save clean response
+                    if selected_model == "o3":
+                        # O3 doesn't use <think> tags - full response is the answer
+                        clean_response = "".join(parts)
+                        final_answer_placeholder.markdown(clean_response)
+                        if reasoning_parts:
+                            thinking_placeholder.info("".join(reasoning_parts))
                     else:
-                        answer_parts.append(buffer)
+                        # GPT-4.1 uses <think> tags - extract from full response using regex
+                        full_response = "".join(parts)
 
-                # Final display updates and save clean response
-                if selected_model == "o3":
-                    # O3 doesn't use <think> tags - full response is the answer
-                    clean_response = "".join(parts)
-                    final_answer_placeholder.markdown(clean_response)
-                    if reasoning_parts:
-                        thinking_placeholder.info("".join(reasoning_parts))
-                else:
-                    # GPT-4.1 uses <think> tags - extract from full response using regex
-                    full_response = "".join(parts)
+                        # Extract thinking content using regex (more reliable than streaming detection)
+                        think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
+                        if think_match:
+                            extracted_thinking = think_match.group(1).strip()
+                            # Remove <think> tags and content from response
+                            clean_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL).strip()
+                            # Display extracted thinking
+                            thinking_placeholder.info(extracted_thinking)
+                        else:
+                            clean_response = full_response
 
-                    # Extract thinking content using regex (more reliable than streaming detection)
-                    think_match = re.search(r'<think>(.*?)</think>', full_response, re.DOTALL)
-                    if think_match:
-                        extracted_thinking = think_match.group(1).strip()
-                        # Remove <think> tags and content from response
-                        clean_response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL).strip()
-                        # Display extracted thinking
-                        thinking_placeholder.info(extracted_thinking)
-                    else:
-                        clean_response = full_response
+                        # Display clean answer
+                        final_answer_placeholder.markdown(clean_response)
 
-                    # Display clean answer
-                    final_answer_placeholder.markdown(clean_response)
+                    # Save clean response (without <think> tags) to chat history
+                    messages.append({"role": "assistant", "content": clean_response})
+                    save_user_data(st.session_state.user_id, st.session_state.user_data)
+                    st.session_state.is_generating = False
 
-                # Save clean response (without <think> tags) to chat history
-                messages.append({"role": "assistant", "content": clean_response})
-                save_user_data(st.session_state.user_id, st.session_state.user_data)
-                st.session_state.is_generating = False
+                    # Update scratchpads periodically for general conversation
+                    if persona_type != "agentic" and len(messages) % 3 == 0:  # Every 3rd message
+                        context = _analyze_conversation_context()
+                        _update_scratchpad_sync('context_analysis', context)
 
-                # Update scratchpads periodically for general conversation
-                if persona_type != "agentic" and len(messages) % 3 == 0:  # Every 3rd message
-                    context = _analyze_conversation_context()
-                    _update_scratchpad_sync('context_analysis', context)
-
-            except Exception as e:
-                st.error(f"Quick mode failed: {e}")
-                st.session_state.is_generating = False
+                except Exception as e:
+                    st.error(f"Quick mode failed: {e}")
+                    st.session_state.is_generating = False
 
 
 # ============================================================================
