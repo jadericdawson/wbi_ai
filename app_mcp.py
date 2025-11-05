@@ -9594,7 +9594,8 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
     If context limit is exceeded, reduces context limits by 50% and raises an exception
     to signal that the caller should rebuild messages and retry.
 
-    If rate limit (429) is hit, implements exponential backoff retry logic.
+    If rate limit (429) is hit, parses the exact retry time from Azure's error message
+    and waits exactly that long (no arbitrary delays).
 
     Args:
         client: OpenAI client instance
@@ -9609,8 +9610,7 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
     Raises:
         ContextLengthExceededError: With reduced limits, caller should rebuild messages and retry
     """
-    max_retries = 3
-    base_delay = 2  # Start with 2 seconds
+    max_retries = 5  # Increased from 3 since we're using exact wait times
 
     for attempt in range(max_retries):
         try:
@@ -9626,14 +9626,49 @@ def make_api_call_with_context_recovery(client, model, messages, response_format
             # Check for rate limit errors (429)
             if "429" in error_str or "rate limit" in error_str.lower():
                 if attempt < max_retries - 1:
-                    # Exponential backoff: 2s, 4s, 8s
-                    delay = base_delay * (2 ** attempt)
-                    logger.warning(f"Rate limit hit for {call_type} call. Retrying in {delay} seconds... (attempt {attempt + 1}/{max_retries})")
-                    time.sleep(delay)
+                    # Parse exact retry time from Azure error message
+                    # Message format: "Try again in X seconds" or "Try again in X minutes"
+                    retry_delay = None
+
+                    import re
+
+                    # Try to extract "Try again in X seconds"
+                    match = re.search(r'[Tt]ry again in (\d+)\s*second', error_str)
+                    if match:
+                        retry_delay = int(match.group(1))
+                        logger.info(f"⏱️  Azure requested retry in {retry_delay} seconds (parsed from error message)")
+
+                    # Try to extract "Try again in X minutes"
+                    if not retry_delay:
+                        match = re.search(r'[Tt]ry again in (\d+)\s*minute', error_str)
+                        if match:
+                            retry_delay = int(match.group(1)) * 60
+                            logger.info(f"⏱️  Azure requested retry in {retry_delay} seconds ({int(match.group(1))} minutes, parsed from error message)")
+
+                    # Check for Retry-After header if available
+                    if not retry_delay and hasattr(e, 'response') and hasattr(e.response, 'headers'):
+                        retry_after = e.response.headers.get('Retry-After') or e.response.headers.get('retry-after')
+                        if retry_after:
+                            try:
+                                retry_delay = int(retry_after)
+                                logger.info(f"⏱️  Using Retry-After header: {retry_delay} seconds")
+                            except ValueError:
+                                pass
+
+                    # Fallback to exponential backoff if we couldn't parse the time
+                    if not retry_delay:
+                        retry_delay = 2 * (2 ** attempt)  # 2s, 4s, 8s, 16s, 32s
+                        logger.warning(f"⚠️  Could not parse retry time from error. Using exponential backoff: {retry_delay} seconds")
+
+                    # Add a small buffer (0.5s) to account for processing time
+                    retry_delay_with_buffer = retry_delay + 0.5
+
+                    logger.warning(f"🔄 Rate limit hit for {call_type} call. Waiting exactly {retry_delay} seconds (+0.5s buffer) as requested by Azure... (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay_with_buffer)
                     continue
                 else:
                     # Max retries reached, raise the error
-                    logger.error(f"Rate limit exceeded after {max_retries} attempts for {call_type} call")
+                    logger.error(f"❌ Rate limit exceeded after {max_retries} attempts for {call_type} call")
                     raise
 
             # Check for context length errors (various forms)
@@ -10753,8 +10788,9 @@ Use all the information above to compile the final answer."""}
                     log_placeholder.markdown(scratchpad, unsafe_allow_html=True)
                     return final_answer
 
-            # Add delay after orchestrator call to prevent rate limit bursts
+            # PREVENTIVE delay after orchestrator call to avoid rate limit bursts
             # This spaces out the orchestrator API call from subsequent agent calls
+            # Note: This is preventive, not recovery. Rate limit recovery uses Azure's exact retry time.
             time.sleep(0.5)
 
             # Execute tasks in parallel using ThreadPoolExecutor
@@ -10791,7 +10827,8 @@ Use all the information above to compile the final answer."""}
                                 display_scratchpad
                             )
                             future_to_task[future] = task_obj
-                            # Stagger API calls by 0.25s to avoid hitting rate limits
+                            # PREVENTIVE stagger: Prevents all parallel agents from hitting API simultaneously
+                            # Note: This is preventive, not recovery. Rate limit recovery uses Azure's exact retry time.
                             time.sleep(0.25)
 
                         # Collect results as they complete
